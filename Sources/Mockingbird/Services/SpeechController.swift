@@ -260,12 +260,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         detail = isEnabled ? "Clipboard fallback enabled." : "Clipboard fallback disabled."
     }
 
-    func downloadCachedAudio(_ entry: AudioCacheEntry) {
+    @discardableResult
+    func downloadCachedAudio(_ entry: AudioCacheEntry) -> Bool {
         guard FileManager.default.fileExists(atPath: entry.url.path) else {
             refreshAudioCache()
             status = .error("Cached audio is missing.")
             detail = "That audio file is no longer available."
-            return
+            return false
         }
 
         do {
@@ -273,9 +274,11 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             let destination = availableDownloadURL(for: entry.url.lastPathComponent, in: downloads)
             try FileManager.default.copyItem(at: entry.url, to: destination)
             detail = "Saved \(destination.lastPathComponent) to Downloads."
+            return true
         } catch {
             status = .error("Could not download audio.")
             detail = error.localizedDescription
+            return false
         }
     }
 

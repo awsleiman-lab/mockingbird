@@ -1,10 +1,16 @@
 import SwiftUI
 
+private enum CacheDownloadFeedback: Equatable {
+    case saved
+    case failed
+}
+
 struct MockingbirdMenuView: View {
     @ObservedObject var controller: SpeechController
     @State private var isCacheExpanded = false
     @State private var isSetupDetailsExpanded = false
     @State private var isShortcutsExpanded = false
+    @State private var cacheDownloadFeedback: [String: CacheDownloadFeedback] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -16,12 +22,6 @@ struct MockingbirdMenuView: View {
                 accessibilityPanel
             } else if case let .error(message) = controller.status {
                 errorPanel(message)
-            }
-
-            statusSurface
-
-            if !controller.currentAudioPreview.isEmpty {
-                currentAudioPreview
             }
 
             voiceSection
@@ -362,73 +362,6 @@ struct MockingbirdMenuView: View {
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var statusSurface: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 10) {
-                Color.clear
-                    .frame(width: 24, height: 1)
-
-                HStack {
-                    Text(progressLeadingText)
-                    Spacer()
-                    Text(progressTrailingText)
-                }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-            }
-
-            HStack(alignment: .center, spacing: 10) {
-                Button {
-                    performTransportAction()
-                } label: {
-                    Image(systemName: transportIcon)
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.borderless)
-                .help(transportHelp)
-                .disabled(!canUseTransport)
-
-                seekBar
-            }
-        }
-    }
-
-    private var seekBar: some View {
-        GeometryReader { geometry in
-            let progress = min(max(controller.progress, 0), 1)
-            let width = max(geometry.size.width, 1)
-
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(.quaternary)
-
-                Capsule()
-                    .fill(Color.accentColor)
-                    .frame(width: width * progress)
-            }
-            .frame(height: 8)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        guard canSeek else { return }
-                        controller.seek(toProgress: value.location.x / width)
-                    }
-            )
-            .opacity(canSeek || controller.progress > 0 ? 1 : 0.55)
-        }
-        .frame(height: 8)
-    }
-
-    private var currentAudioPreview: some View {
-        Text(controller.currentAudioPreview)
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
-    }
-
     private func cacheRow(_ entry: AudioCacheEntry) -> some View {
         HStack(spacing: 8) {
             Button {
@@ -462,9 +395,9 @@ struct MockingbirdMenuView: View {
             Spacer()
 
             Button {
-                controller.downloadCachedAudio(entry)
+                triggerCacheDownload(entry)
             } label: {
-                Image(systemName: "arrow.down.circle")
+                cacheDownloadLabel(for: entry)
             }
             .buttonStyle(.borderless)
             .help("Save to Downloads")
@@ -477,7 +410,7 @@ struct MockingbirdMenuView: View {
             }
 
             Button {
-                controller.downloadCachedAudio(entry)
+                triggerCacheDownload(entry)
             } label: {
                 Label("Save to Downloads", systemImage: "arrow.down.circle")
             }
@@ -500,6 +433,42 @@ struct MockingbirdMenuView: View {
                 controller.deleteCachedAudio(entry)
             } label: {
                 Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func cacheDownloadLabel(for entry: AudioCacheEntry) -> some View {
+        switch cacheDownloadFeedback[entry.id] {
+        case .saved:
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                Text("Saved")
+                    .font(.caption2)
+            }
+            .foregroundStyle(.primary)
+        case .failed:
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                Text("Failed")
+                    .font(.caption2)
+            }
+            .foregroundStyle(.secondary)
+        case nil:
+            Image(systemName: "arrow.down.circle")
+        }
+    }
+
+    private func triggerCacheDownload(_ entry: AudioCacheEntry) {
+        let feedback: CacheDownloadFeedback = controller.downloadCachedAudio(entry) ? .saved : .failed
+        withAnimation(.easeOut(duration: 0.15)) {
+            cacheDownloadFeedback[entry.id] = feedback
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            guard cacheDownloadFeedback[entry.id] == feedback else { return }
+            withAnimation(.easeOut(duration: 0.15)) {
+                cacheDownloadFeedback[entry.id] = nil
             }
         }
     }
@@ -527,77 +496,6 @@ struct MockingbirdMenuView: View {
             }
         }
         .buttonStyle(.plain)
-    }
-
-    private var transportIcon: String {
-        switch controller.status {
-        case .generating:
-            return "stop.fill"
-        case .playing:
-            return "pause.fill"
-        case .paused:
-            return "play.fill"
-        default:
-            return "speaker.wave.2"
-        }
-    }
-
-    private var transportHelp: String {
-        switch controller.status {
-        case .generating:
-            return "Stop Generating"
-        case .playing:
-            return "Pause"
-        case .paused:
-            return "Resume"
-        default:
-            return "Read Selection"
-        }
-    }
-
-    private var canUseTransport: Bool {
-        switch controller.status {
-        case .starting:
-            return false
-        default:
-            return !controller.setupFailed
-        }
-    }
-
-    private var progressLeadingText: String {
-        if controller.status == .generating {
-            return controller.progressText.isEmpty ? "Generating speech..." : controller.progressText
-        }
-
-        return format(controller.currentTime)
-    }
-
-    private var progressTrailingText: String {
-        if controller.status == .generating {
-            return ""
-        }
-
-        return format(controller.duration)
-    }
-
-    private var canSeek: Bool {
-        switch controller.status {
-        case .playing, .paused:
-            return controller.duration > 0
-        default:
-            return false
-        }
-    }
-
-    private func performTransportAction() {
-        switch controller.status {
-        case .generating:
-            controller.stop()
-        case .playing, .paused:
-            controller.togglePause()
-        default:
-            controller.readSelectionOrClipboard()
-        }
     }
 
     private func format(_ interval: TimeInterval) -> String {
