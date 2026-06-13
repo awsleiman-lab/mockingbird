@@ -30,6 +30,10 @@ struct MockingbirdMenuView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
 
+            if controller.showsSetupPanel {
+                setupPanel
+            }
+
             statusSurface
 
             HStack(spacing: 10) {
@@ -229,6 +233,61 @@ struct MockingbirdMenuView: View {
                 }
             }
         }
+    }
+
+    private var setupPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: controller.setupFailed ? "exclamationmark.triangle.fill" : "arrow.down.circle")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(controller.setupFailed ? .red : .secondary)
+
+                Text(controller.setupFailed ? "Speech Setup Failed" : "Installing Speech Engine")
+                    .font(.callout.weight(.semibold))
+
+                Spacer()
+
+                if controller.isSettingUp {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Text(controller.setupProgressText.isEmpty ? "Preparing local installation..." : controller.setupProgressText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            if !controller.setupLogLines.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(controller.setupLogLines, id: \.self) { line in
+                        Text(line)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.tertiary, in: RoundedRectangle(cornerRadius: 6))
+            }
+
+            if controller.setupFailed {
+                Text(controller.setupFailureDetails)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(3)
+
+                Button {
+                    controller.retrySetup()
+                } label: {
+                    Label("Retry Setup", systemImage: "arrow.clockwise")
+                }
+            }
+        }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var statusSurface: some View {

@@ -6,8 +6,8 @@ Mockingbird is a self-contained macOS menu bar app that reads selected text alou
 
 - Global hotkeys, no Apple Shortcuts app required.
 - Cold-start synthesis: no Python speech process stays resident while idle.
-- First-run setup: if `.venv` is missing, Mockingbird runs `scripts/setup.sh` to install the speech engine and download model assets.
-- Menu bar controls for generation state, playback progress, pause/resume, stop, and editable hotkeys.
+- First-run setup: Mockingbird installs its private speech runtime into `~/Library/Application Support/Mockingbird`.
+- Menu bar controls for setup status, generation state, playback progress, pause/resume, stop, voice settings, audio cache, and editable hotkeys.
 
 Default hotkeys:
 
@@ -31,14 +31,23 @@ Mockingbird.app
 
 ## Ship To Another Mac
 
-Copy this whole `Mockingbird` folder. On the other Mac:
+Build the app, then share `Mockingbird.app`:
 
 ```bash
 scripts/package_app.sh
-scripts/launch.sh
 ```
 
-If `.venv` is not present, the app will install the speech engine on first launch. That first launch needs internet access for Python packages and model assets. After setup, text-to-speech is local.
+The recipient can drag `Mockingbird.app` to `/Applications` and launch it. On first launch, Mockingbird checks its private runtime in:
+
+```bash
+~/Library/Application Support/Mockingbird
+```
+
+If the speech engine is missing or broken, the app shows a setup panel and installs Python, Kokoro, and model assets there. First setup needs internet access. After setup, text-to-speech is local.
+
+## Local Runtime
+
+Mockingbird keeps generated audio and request files in its Application Support folder, not in this repository. Local helper scripts such as `scripts/read-selected.sh`, `scripts/pause.sh`, and `scripts/stop.sh` send commands to that runtime folder.
 
 ## Privacy
 

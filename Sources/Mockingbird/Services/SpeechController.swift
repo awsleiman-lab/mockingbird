@@ -16,6 +16,10 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var speechSpeed: Double
     @Published var usesClipboardFallback: Bool
     @Published var audioCache: [AudioCacheEntry] = []
+    @Published var setupProgressText: String = ""
+    @Published var setupFailureDetails: String = ""
+    @Published var setupLogLines: [String] = []
+    @Published var setupFailed: Bool = false
 
     private var synthesisProcess: Process?
     private var progressTimer: Timer?
@@ -45,6 +49,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             }
         }
         registerHotKeys()
+        prepareRuntimeDirectory()
         prepareRequestDirectory()
         prepareAudioCacheDirectory()
         refreshAudioCache()
@@ -246,46 +251,71 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         status == .generating || status == .playing || status == .paused
     }
 
-    private func bootstrapAndStart() {
-        if FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path) {
-            status = .ready
-            detail = "Ready for selected text."
-            return
-        }
+    var isSettingUp: Bool {
+        status == .starting
+    }
 
+    var showsSetupPanel: Bool {
+        isSettingUp || setupFailed
+    }
+
+    func retrySetup() {
+        bootstrapAndStart(forceSetup: true)
+    }
+
+    private func bootstrapAndStart(forceSetup: Bool = false) {
         status = .starting
-        detail = "Installing the speech engine locally. This can take a few minutes the first time."
+        setupFailed = false
+        setupFailureDetails = ""
+        setupLogLines = []
+        setupProgressText = forceSetup ? "Preparing local installation..." : "Checking speech engine..."
+        detail = forceSetup
+            ? "Installing the speech engine locally. This can take a few minutes the first time."
+            : "Checking the local speech engine."
 
         Task {
             do {
+                if !forceSetup, try await speechEngineIsReady() {
+                    setupFailed = false
+                    setupProgressText = ""
+                    setupFailureDetails = ""
+                    setupLogLines = []
+                    status = .ready
+                    detail = "Ready for selected text."
+                    return
+                }
+
+                setupProgressText = "Preparing local installation..."
+                detail = "Installing the speech engine locally. This can take a few minutes the first time."
                 try await runSetup()
+                setupFailed = false
+                setupFailureDetails = ""
+                setupProgressText = "Speech engine installed."
                 status = .ready
                 detail = "Ready for selected text."
             } catch {
+                setupFailed = true
                 status = .error("Speech engine setup failed.")
-                detail = error.localizedDescription
+                setupFailureDetails = error.localizedDescription
+                detail = "Setup failed. Review details below, then retry."
             }
         }
     }
 
-    private func runSetup() async throws {
-        try await withCheckedThrowingContinuation { continuation in
+    private func speechEngineIsReady() async throws -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path) else {
+            return false
+        }
+
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
             let process = Process()
-            process.executableURL = MockingbirdPaths.setup
-            process.currentDirectoryURL = MockingbirdPaths.root
-            FileManager.default.createFile(atPath: MockingbirdPaths.log.path, contents: nil)
-            process.standardOutput = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
-            process.standardError = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
+            process.executableURL = MockingbirdPaths.python
+            process.arguments = ["-c", "import kokoro, soundfile, numpy"]
+            process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
+            process.standardOutput = Pipe()
+            process.standardError = Pipe()
             process.terminationHandler = { process in
-                if process.terminationStatus == 0 {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: NSError(
-                        domain: "Mockingbird",
-                        code: Int(process.terminationStatus),
-                        userInfo: [NSLocalizedDescriptionKey: "Setup exited with code \(process.terminationStatus). See /tmp/mockingbird.log."]
-                    ))
-                }
+                continuation.resume(returning: process.terminationStatus == 0)
             }
 
             do {
@@ -296,9 +326,81 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
     }
 
+    private func runSetup() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let process = Process()
+            let output = Pipe()
+            let logHandle: FileHandle?
+            prepareRuntimeDirectory()
+            process.executableURL = MockingbirdPaths.setup
+            process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
+            process.environment = setupEnvironment()
+            FileManager.default.createFile(atPath: MockingbirdPaths.log.path, contents: nil)
+            logHandle = try? FileHandle(forWritingTo: MockingbirdPaths.log)
+            process.standardOutput = output
+            process.standardError = output
+            output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+                let data = handle.availableData
+                guard !data.isEmpty else { return }
+                logHandle?.write(data)
+                guard let text = String(data: data, encoding: .utf8) else { return }
+                Task { @MainActor in
+                    self?.appendSetupOutput(text)
+                }
+            }
+            process.terminationHandler = { process in
+                output.fileHandleForReading.readabilityHandler = nil
+                logHandle?.closeFile()
+                if process.terminationStatus == 0 {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: NSError(
+                        domain: "Mockingbird",
+                        code: Int(process.terminationStatus),
+                        userInfo: [NSLocalizedDescriptionKey: "Setup exited with code \(process.terminationStatus). See \(MockingbirdPaths.log.path)."]
+                    ))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                output.fileHandleForReading.readabilityHandler = nil
+                logHandle?.closeFile()
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    private func setupEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["MOCKINGBIRD_RESOURCE_ROOT"] = MockingbirdPaths.resourcesRoot.path
+        environment["MOCKINGBIRD_RUNTIME_ROOT"] = MockingbirdPaths.runtimeRoot.path
+        return environment
+    }
+
+    private func appendSetupOutput(_ text: String) {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !lines.isEmpty else { return }
+
+        setupLogLines = Array((setupLogLines + lines).suffix(8))
+        setupProgressText = lines.last ?? setupProgressText
+    }
+
     private func prepareRequestDirectory() {
         try? FileManager.default.createDirectory(
             at: MockingbirdPaths.requestDirectory,
+            withIntermediateDirectories: true
+        )
+    }
+
+    private func prepareRuntimeDirectory() {
+        try? FileManager.default.createDirectory(
+            at: MockingbirdPaths.runtimeRoot,
             withIntermediateDirectories: true
         )
     }
@@ -555,7 +657,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                 "--speed",
                 String(format: "%.2f", speechSpeed)
             ]
-            process.currentDirectoryURL = MockingbirdPaths.root
+            process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
             process.standardInput = input
             process.standardOutput = output
             process.standardError = errorOutput
