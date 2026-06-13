@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "KokoroBar",
+    name: "Mockingbird",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "KokoroBar", targets: ["KokoroBar"])
+        .executable(name: "Mockingbird", targets: ["Mockingbird"])
     ],
     targets: [
-        .executableTarget(name: "KokoroBar")
+        .executableTarget(name: "Mockingbird")
     ]
 )

@@ -1,7 +1,7 @@
 .DS_Store
 .build/
 build-cache/
-KokoroBar.app/
+Mockingbird.app/
 runtime/requests/*
 !runtime/requests/.gitkeep
 .venv/

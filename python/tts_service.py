@@ -42,7 +42,7 @@ def clean_text(text: str) -> str:
     return markdown_to_speech(text).strip()
 
 
-class KokoroState:
+class SpeechEngine:
     def __init__(self) -> None:
         self.pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
 
@@ -57,10 +57,10 @@ class KokoroState:
             chunks.append(np.asarray(audio, dtype=np.float32))
 
         if not chunks:
-            raise RuntimeError("Kokoro did not produce audio.")
+            raise RuntimeError("The speech engine did not produce audio.")
 
         audio = np.concatenate(chunks)
-        with tempfile.NamedTemporaryFile(prefix="kokoro-service-", suffix=".wav", delete=False) as wav:
+        with tempfile.NamedTemporaryFile(prefix="mockingbird-service-", suffix=".wav", delete=False) as wav:
             wav_path = wav.name
 
         sf.write(wav_path, audio, SAMPLE_RATE)
@@ -73,7 +73,7 @@ class KokoroState:
 
 
 class Handler(BaseHTTPRequestHandler):
-    state: KokoroState
+    state: SpeechEngine
 
     def log_message(self, format: str, *args) -> None:
         return
@@ -116,7 +116,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
-    Handler.state = KokoroState()
+    Handler.state = SpeechEngine()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(json.dumps({"ready": True, "host": args.host, "port": args.port}), flush=True)
     server.serve_forever()

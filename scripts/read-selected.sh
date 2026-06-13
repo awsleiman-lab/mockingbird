@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REQUEST_DIR="$ROOT/runtime/requests"
-LOG="/tmp/kokoro-service-shortcut.log"
+LOG="/tmp/mockingbird-shortcut.log"
 
 mkdir -p "$REQUEST_DIR"
 

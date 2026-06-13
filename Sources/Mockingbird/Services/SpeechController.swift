@@ -4,7 +4,7 @@ import Carbon
 import Foundation
 
 @MainActor
-final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate {
+final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var status: PlaybackStatus = .starting
     @Published var progress: Double = 0
     @Published var currentTime: TimeInterval = 0
@@ -39,15 +39,15 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     var menuTitle: String {
         switch status {
         case .generating:
-            "Kokoro..."
+            "Mockingbird..."
         case .playing:
-            "Kokoro"
+            "Mockingbird"
         case .paused:
             "Paused"
         case .error:
-            "Kokoro!"
+            "Mockingbird!"
         default:
-            "Kokoro"
+            "Mockingbird"
         }
     }
 
@@ -86,7 +86,7 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
         guard ensureAccessibilityPermission() else {
             status = .error("Accessibility permission needed.")
-            detail = "Allow KokoroBar in Privacy & Security > Accessibility, then press \(hotKeyLabel(for: .read)) again."
+            detail = "Allow Mockingbird in Privacy & Security > Accessibility, then press \(hotKeyLabel(for: .read)) again."
             return
         }
 
@@ -184,20 +184,20 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func bootstrapAndStart() {
-        if FileManager.default.isExecutableFile(atPath: KokoroPaths.python.path) {
+        if FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path) {
             startService()
             return
         }
 
         status = .starting
-        detail = "Installing Kokoro locally. This can take a few minutes the first time."
+        detail = "Installing the speech engine locally. This can take a few minutes the first time."
 
         Task {
             do {
                 try await runSetup()
                 startService()
             } catch {
-                status = .error("Kokoro setup failed.")
+                status = .error("Speech engine setup failed.")
                 detail = error.localizedDescription
             }
         }
@@ -206,19 +206,19 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private func runSetup() async throws {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
-            process.executableURL = KokoroPaths.setup
-            process.currentDirectoryURL = KokoroPaths.root
-            FileManager.default.createFile(atPath: KokoroPaths.log.path, contents: nil)
-            process.standardOutput = FileHandle(forWritingAtPath: KokoroPaths.log.path)
-            process.standardError = FileHandle(forWritingAtPath: KokoroPaths.log.path)
+            process.executableURL = MockingbirdPaths.setup
+            process.currentDirectoryURL = MockingbirdPaths.root
+            FileManager.default.createFile(atPath: MockingbirdPaths.log.path, contents: nil)
+            process.standardOutput = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
+            process.standardError = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
             process.terminationHandler = { process in
                 if process.terminationStatus == 0 {
                     continuation.resume()
                 } else {
                     continuation.resume(throwing: NSError(
-                        domain: "KokoroBar",
+                        domain: "Mockingbird",
                         code: Int(process.terminationStatus),
-                        userInfo: [NSLocalizedDescriptionKey: "Setup exited with code \(process.terminationStatus). See /tmp/kokoro-bar.log."]
+                        userInfo: [NSLocalizedDescriptionKey: "Setup exited with code \(process.terminationStatus). See /tmp/mockingbird.log."]
                     ))
                 }
             }
@@ -233,7 +233,7 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     private func prepareRequestDirectory() {
         try? FileManager.default.createDirectory(
-            at: KokoroPaths.requestDirectory,
+            at: MockingbirdPaths.requestDirectory,
             withIntermediateDirectories: true
         )
     }
@@ -244,7 +244,7 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         Task {
             if await isServiceHealthy() {
                 status = .ready
-                detail = "Connected to the local Kokoro service."
+                detail = "Connected to the local speech service."
                 return
             }
 
@@ -254,18 +254,18 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     private func launchServiceProcess() {
         let process = Process()
-        process.executableURL = KokoroPaths.python
-        process.arguments = [KokoroPaths.service.path, "--port", "8765"]
-        FileManager.default.createFile(atPath: KokoroPaths.log.path, contents: nil)
-        process.standardOutput = FileHandle(forWritingAtPath: KokoroPaths.log.path)
-        process.standardError = FileHandle(forWritingAtPath: KokoroPaths.log.path)
+        process.executableURL = MockingbirdPaths.python
+        process.arguments = [MockingbirdPaths.service.path, "--port", "8765"]
+        FileManager.default.createFile(atPath: MockingbirdPaths.log.path, contents: nil)
+        process.standardOutput = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
+        process.standardError = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
 
         do {
             try process.run()
             serviceProcess = process
             waitForHealth()
         } catch {
-            status = .error("Could not start Kokoro.")
+            status = .error("Could not start the speech engine.")
             detail = error.localizedDescription
         }
     }
@@ -282,8 +282,8 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     private func waitForHealth(attempt: Int = 0) {
         guard attempt < 40 else {
-            status = .error("Kokoro service did not become ready.")
-            detail = "Open /tmp/kokoro-bar.log for details."
+            status = .error("Speech service did not become ready.")
+            detail = "Open /tmp/mockingbird.log for details."
             return
         }
 
@@ -321,7 +321,7 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         guard status != .generating else { return }
 
         let urls = (try? FileManager.default.contentsOfDirectory(
-            at: KokoroPaths.requestDirectory,
+            at: MockingbirdPaths.requestDirectory,
             includingPropertiesForKeys: [.creationDateKey],
             options: [.skipsHiddenFiles]
         )) ?? []
@@ -476,7 +476,7 @@ final class KokoroController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             let error = (try? JSONDecoder().decode(ServiceError.self, from: data).error) ?? "Unknown service error."
-            throw NSError(domain: "KokoroBar", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+            throw NSError(domain: "Mockingbird", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
         }
 
         return try JSONDecoder().decode(SynthesisResult.self, from: data)

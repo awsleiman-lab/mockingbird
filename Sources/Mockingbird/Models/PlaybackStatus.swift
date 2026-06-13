@@ -12,7 +12,7 @@ enum PlaybackStatus: Equatable {
     var title: String {
         switch self {
         case .starting:
-            "Starting Kokoro"
+            "Starting speech engine"
         case .ready:
             "Ready"
         case .generating:

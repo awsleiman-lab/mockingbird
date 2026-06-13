@@ -5,13 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>KokoroBar</string>
+	<string>Mockingbird</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.awsleiman.KokoroBar</string>
+	<string>com.awsleiman.Mockingbird</string>
+	<key>CFBundleIconFile</key>
+	<string>Mockingbird</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>KokoroBar</string>
+	<string>Mockingbird</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -20,7 +22,7 @@
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-	<key>KokoroBarProjectRoot</key>
+	<key>MockingbirdProjectRoot</key>
 	<string></string>
 	<key>NSHighResolutionCapable</key>
 	<true/>

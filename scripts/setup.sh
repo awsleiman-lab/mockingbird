@@ -12,7 +12,7 @@ fi
 
 ".venv/bin/python" -m pip install --upgrade pip setuptools wheel
 ".venv/bin/python" -m pip install kokoro soundfile numpy
-".venv/bin/python" "$ROOT/python/kokoro_service.py" --port 8766 >/tmp/kokoro-setup-smoke.log 2>&1 &
+".venv/bin/python" "$ROOT/python/tts_service.py" --port 8766 >/tmp/mockingbird-setup-smoke.log 2>&1 &
 service_pid=$!
 
 for _ in {1..80}; do
@@ -24,7 +24,7 @@ done
 
 curl -fsS -X POST http://127.0.0.1:8766/synthesize \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Kokoro setup complete.","voice":"af_heart","speed":1.0}' >/dev/null
+  -d '{"text":"Mockingbird setup complete.","voice":"af_heart","speed":1.0}' >/dev/null
 
 kill "$service_pid" >/dev/null 2>&1 || true
-echo "KokoroBar setup complete."
+echo "Mockingbird setup complete."

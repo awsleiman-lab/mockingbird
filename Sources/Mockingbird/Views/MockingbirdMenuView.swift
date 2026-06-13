@@ -1,7 +1,7 @@
 import SwiftUI
 
-struct KokoroMenuView: View {
-    @ObservedObject var controller: KokoroController
+struct MockingbirdMenuView: View {
+    @ObservedObject var controller: SpeechController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -54,7 +54,7 @@ struct KokoroMenuView: View {
 
             hotKeySection
 
-            Button("Quit KokoroBar") {
+            Button("Quit Mockingbird") {
                 NSApp.terminate(nil)
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -70,7 +70,7 @@ struct KokoroMenuView: View {
                 .frame(width: 28)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("KokoroBar")
+                Text("Mockingbird")
                     .font(.headline)
                 Text(controller.status.title)
                     .font(.caption)

@@ -1,12 +1,12 @@
 import Foundation
 
-enum KokoroPaths {
+enum MockingbirdPaths {
     static var root: URL {
-        if let override = ProcessInfo.processInfo.environment["KOKORO_BAR_ROOT"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment["MOCKINGBIRD_ROOT"], !override.isEmpty {
             return URL(fileURLWithPath: override)
         }
 
-        if let bundledRoot = Bundle.main.object(forInfoDictionaryKey: "KokoroBarProjectRoot") as? String,
+        if let bundledRoot = Bundle.main.object(forInfoDictionaryKey: "MockingbirdProjectRoot") as? String,
            !bundledRoot.isEmpty {
             return URL(fileURLWithPath: bundledRoot)
         }
@@ -20,8 +20,8 @@ enum KokoroPaths {
     }
 
     static let python = root.appending(path: ".venv/bin/python")
-    static let service = root.appending(path: "python/kokoro_service.py")
+    static let service = root.appending(path: "python/tts_service.py")
     static let requestDirectory = root.appending(path: "runtime/requests")
     static let setup = root.appending(path: "scripts/setup.sh")
-    static let log = URL(fileURLWithPath: "/tmp/kokoro-bar.log")
+    static let log = URL(fileURLWithPath: "/tmp/mockingbird.log")
 }

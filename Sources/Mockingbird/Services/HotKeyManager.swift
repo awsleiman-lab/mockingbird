@@ -111,7 +111,7 @@ final class HotKeyManager {
     }
 
     private static let signature: OSType = {
-        let chars = Array("KBar".utf8)
+        let chars = Array("MBrd".utf8)
         return chars.reduce(0) { ($0 << 8) + OSType($1) }
     }()
 }

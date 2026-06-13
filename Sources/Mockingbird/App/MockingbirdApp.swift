@@ -1,13 +1,13 @@
 import SwiftUI
 
 @main
-struct KokoroBarApp: App {
+struct MockingbirdApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var controller = KokoroController()
+    @StateObject private var controller = SpeechController()
 
     var body: some Scene {
         MenuBarExtra {
-            KokoroMenuView(controller: controller)
+            MockingbirdMenuView(controller: controller)
                 .frame(width: 320)
         } label: {
             Image(systemName: controller.menuIcon)
