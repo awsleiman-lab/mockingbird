@@ -12,11 +12,17 @@ struct MockingbirdMenuView: View {
 
             if controller.showsSetupPanel {
                 setupPanel
+            } else if controller.needsAccessibilityPermission {
+                accessibilityPanel
             } else if case let .error(message) = controller.status {
                 errorPanel(message)
             }
 
             statusSurface
+
+            if !controller.currentAudioPreview.isEmpty {
+                currentAudioPreview
+            }
 
             voiceSection
 
@@ -70,7 +76,7 @@ struct MockingbirdMenuView: View {
                     set: { controller.setVoice($0) }
                 )) {
                     ForEach(controller.availableVoices, id: \.self) { voice in
-                        Text(voice).tag(voice)
+                        Text(controller.voiceDisplayName(voice)).tag(voice)
                     }
                 }
                 .labelsHidden()
@@ -205,6 +211,17 @@ struct MockingbirdMenuView: View {
             Spacer()
 
             Button {
+                controller.resetSettings()
+            } label: {
+                Image(systemName: "arrow.counterclockwise.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help("Reset Settings")
+
+            Button {
                 NSApp.terminate(nil)
             } label: {
                 Image(systemName: "power")
@@ -216,6 +233,42 @@ struct MockingbirdMenuView: View {
             .help("Quit Mockingbird")
         }
         .padding(.top, 2)
+    }
+
+    private var accessibilityPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "hand.raised.fill")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.orange)
+
+                Text("Accessibility Needed")
+                    .font(.callout.weight(.semibold))
+
+                Spacer()
+            }
+
+            Text("Allow Mockingbird in Privacy & Security, then try reading again.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            HStack {
+                Button {
+                    controller.openAccessibilitySettings()
+                } label: {
+                    Label("Open Settings", systemImage: "gear")
+                }
+
+                Button {
+                    controller.retryAccessibilityRead()
+                } label: {
+                    Label("Try Again", systemImage: "arrow.clockwise")
+                }
+            }
+        }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var setupPanel: some View {
@@ -310,35 +363,83 @@ struct MockingbirdMenuView: View {
     }
 
     private var statusSurface: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            Button {
-                performTransportAction()
-            } label: {
-                Image(systemName: transportIcon)
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(.borderless)
-            .help(transportHelp)
-            .disabled(!canUseTransport)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 10) {
+                Color.clear
+                    .frame(width: 24, height: 1)
 
-            VStack(alignment: .leading, spacing: 5) {
                 HStack {
-                    Text(format(controller.currentTime))
+                    Text(progressLeadingText)
                     Spacer()
-                    Text(format(controller.duration))
+                    Text(progressTrailingText)
                 }
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
+            }
 
-                ProgressView(value: controller.progress)
-                    .opacity(controller.status == .generating ? 0.45 : 1)
+            HStack(alignment: .center, spacing: 10) {
+                Button {
+                    performTransportAction()
+                } label: {
+                    Image(systemName: transportIcon)
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.borderless)
+                .help(transportHelp)
+                .disabled(!canUseTransport)
+
+                seekBar
             }
         }
     }
 
+    private var seekBar: some View {
+        GeometryReader { geometry in
+            let progress = min(max(controller.progress, 0), 1)
+            let width = max(geometry.size.width, 1)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.quaternary)
+
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: width * progress)
+            }
+            .frame(height: 8)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard canSeek else { return }
+                        controller.seek(toProgress: value.location.x / width)
+                    }
+            )
+            .opacity(canSeek || controller.progress > 0 ? 1 : 0.55)
+        }
+        .frame(height: 8)
+    }
+
+    private var currentAudioPreview: some View {
+        Text(controller.currentAudioPreview)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
     private func cacheRow(_ entry: AudioCacheEntry) -> some View {
         HStack(spacing: 8) {
+            Button {
+                controller.performCachePlayback(entry)
+            } label: {
+                Image(systemName: controller.cachePlaybackIcon(for: entry))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.borderless)
+            .help(controller.cachePlaybackHelp(for: entry))
+
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(entry.title)
@@ -367,6 +468,39 @@ struct MockingbirdMenuView: View {
             }
             .buttonStyle(.borderless)
             .help("Save to Downloads")
+        }
+        .contextMenu {
+            Button {
+                controller.performCachePlayback(entry)
+            } label: {
+                Label(controller.cachePlaybackHelp(for: entry), systemImage: controller.cachePlaybackIcon(for: entry))
+            }
+
+            Button {
+                controller.downloadCachedAudio(entry)
+            } label: {
+                Label("Save to Downloads", systemImage: "arrow.down.circle")
+            }
+
+            Button {
+                controller.revealCachedAudio(entry)
+            } label: {
+                Label("Reveal in Finder", systemImage: "finder")
+            }
+
+            Button {
+                controller.copyCachedAudio(entry)
+            } label: {
+                Label("Copy File", systemImage: "doc.on.doc")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                controller.deleteCachedAudio(entry)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
         }
     }
 
@@ -427,6 +561,31 @@ struct MockingbirdMenuView: View {
             return false
         default:
             return !controller.setupFailed
+        }
+    }
+
+    private var progressLeadingText: String {
+        if controller.status == .generating {
+            return controller.progressText.isEmpty ? "Generating speech..." : controller.progressText
+        }
+
+        return format(controller.currentTime)
+    }
+
+    private var progressTrailingText: String {
+        if controller.status == .generating {
+            return ""
+        }
+
+        return format(controller.duration)
+    }
+
+    private var canSeek: Bool {
+        switch controller.status {
+        case .playing, .paused:
+            return controller.duration > 0
+        default:
+            return false
         }
     }
 

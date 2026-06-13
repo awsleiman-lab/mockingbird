@@ -5,7 +5,11 @@ import Foundation
 
 @MainActor
 final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate {
-    @Published var status: PlaybackStatus = .starting
+    @Published var status: PlaybackStatus = .starting {
+        didSet {
+            syncFloatingPlaybackHUD()
+        }
+    }
     @Published var progress: Double = 0
     @Published var currentTime: TimeInterval = 0
     @Published var duration: TimeInterval = 0
@@ -20,6 +24,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var setupFailureDetails: String = ""
     @Published var setupLogLines: [String] = []
     @Published var setupFailed: Bool = false
+    @Published var progressText: String = ""
+    @Published var currentAudioPreview: String = ""
 
     private var synthesisProcess: Process?
     private var synthesisInput: FileHandle?
@@ -29,23 +35,27 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private var synthesisIsGenerating = false
     private var synthesisErrorLines: [String] = []
     private var progressTimer: Timer?
+    private var playbackCompletionTimer: Timer?
     private var requestPollTimer: Timer?
     private var audioPlayer: AVAudioPlayer?
     private var currentAudioPath: String?
+    private var floatingPlaybackHUD: FloatingPlaybackPanelController?
     private var hotKeyManager: HotKeyManager?
     private var localKeyMonitor: Any?
     private var hasRequestedAccessibilityPrompt = false
+    private var isFloatingPlaybackHUDDismissed = false
     private var activeRequestID = 0
     let availableVoices = ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam", "am_michael"]
 
     override init() {
         let defaults = UserDefaults.standard
-        selectedVoice = defaults.string(forKey: Self.voiceDefaultsKey) ?? "af_heart"
+        selectedVoice = defaults.string(forKey: Self.voiceDefaultsKey) ?? Self.defaultVoice
         speechSpeed = Self.clampedSpeed(defaults.object(forKey: Self.speedDefaultsKey) as? Double ?? 1.0)
         usesClipboardFallback = defaults.object(forKey: Self.clipboardFallbackDefaultsKey) as? Bool ?? true
         super.init()
+        floatingPlaybackHUD = FloatingPlaybackPanelController(controller: self)
         if !availableVoices.contains(selectedVoice) {
-            selectedVoice = "af_heart"
+            selectedVoice = Self.defaultVoice
             defaults.set(selectedVoice, forKey: Self.voiceDefaultsKey)
         }
         hotKeys = loadHotKeys()
@@ -82,12 +92,6 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         switch status {
         case .starting:
             "hourglass"
-        case .generating:
-            "wand.and.sparkles"
-        case .playing:
-            "speaker.wave.2.fill"
-        case .paused:
-            "pause.circle"
         case .error:
             "exclamationmark.triangle"
         default:
@@ -121,6 +125,14 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         default:
             return "Ready"
         }
+    }
+
+    var needsAccessibilityPermission: Bool {
+        if case let .error(message) = status {
+            return message.contains("Accessibility")
+        }
+
+        return false
     }
 
     var primaryActionTitle: String {
@@ -180,11 +192,12 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
         guard ensureAccessibilityPermission() else {
             status = .error("Accessibility permission needed.")
-            detail = "Allow Mockingbird in Privacy & Security > Accessibility, then press \(hotKeyLabel(for: .read)) again."
+            detail = "Allow Mockingbird in Privacy & Security > Accessibility, then try again."
             return
         }
 
         detail = "Capturing selected text..."
+        progressText = "Capturing selection..."
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             self.copySelectionAndRead()
         }
@@ -218,11 +231,21 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         hotKeys[action, default: .default(for: action)].display
     }
 
+    func voiceDisplayName(_ voice: String) -> String {
+        voice
+            .split(separator: "_")
+            .dropFirst()
+            .map { part in
+                String(part.prefix(1)).uppercased() + String(part.dropFirst())
+            }
+            .joined(separator: " ")
+    }
+
     func setVoice(_ voice: String) {
         guard availableVoices.contains(voice) else { return }
         selectedVoice = voice
         UserDefaults.standard.set(voice, forKey: Self.voiceDefaultsKey)
-        detail = "Voice set to \(voice)."
+        detail = "Voice set to \(voiceDisplayName(voice))."
     }
 
     func setSpeechSpeed(_ speed: Double) {
@@ -256,9 +279,112 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
     }
 
+    func performCachePlayback(_ entry: AudioCacheEntry) {
+        guard FileManager.default.fileExists(atPath: entry.url.path) else {
+            refreshAudioCache()
+            status = .error("Cached audio is missing.")
+            detail = "That audio file is no longer available."
+            return
+        }
+
+        if currentAudioPath == entry.url.path, status == .playing || status == .paused {
+            togglePause()
+            return
+        }
+
+        activeRequestID += 1
+        let requestID = activeRequestID
+        isFloatingPlaybackHUDDismissed = false
+        stopCurrentWork()
+
+        do {
+            currentAudioPreview = entry.title
+            try playAudio(at: entry.url.path, durationHint: entry.duration ?? 0, requestID: requestID)
+            detail = "Playing \(entry.title)."
+        } catch {
+            status = .error("Could not play cached audio.")
+            detail = error.localizedDescription
+        }
+    }
+
+    func cachePlaybackIcon(for entry: AudioCacheEntry) -> String {
+        guard currentAudioPath == entry.url.path else {
+            return "play.circle"
+        }
+
+        switch status {
+        case .playing:
+            return "pause.circle"
+        case .paused:
+            return "play.circle.fill"
+        default:
+            return "play.circle"
+        }
+    }
+
+    func cachePlaybackHelp(for entry: AudioCacheEntry) -> String {
+        guard currentAudioPath == entry.url.path else {
+            return "Play Cached Audio"
+        }
+
+        switch status {
+        case .playing:
+            return "Pause Cached Audio"
+        case .paused:
+            return "Resume Cached Audio"
+        default:
+            return "Play Cached Audio"
+        }
+    }
+
+    func revealCachedAudio(_ entry: AudioCacheEntry) {
+        NSWorkspace.shared.activateFileViewerSelecting([entry.url])
+    }
+
+    func copyCachedAudio(_ entry: AudioCacheEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.writeObjects([entry.url as NSURL])
+        detail = "Copied \(entry.fileName)."
+    }
+
+    func deleteCachedAudio(_ entry: AudioCacheEntry) {
+        if currentAudioPath == entry.url.path {
+            stop()
+        }
+
+        do {
+            try FileManager.default.removeItem(at: entry.url)
+            refreshAudioCache()
+            detail = "Deleted \(entry.title)."
+        } catch {
+            status = .error("Could not delete cached audio.")
+            detail = error.localizedDescription
+        }
+    }
+
     func openAudioCacheFolder() {
         prepareAudioCacheDirectory()
         NSWorkspace.shared.open(MockingbirdPaths.audioCacheDirectory)
+    }
+
+    func seek(toProgress value: Double) {
+        guard let audioPlayer, audioPlayer.duration > 0 else { return }
+        let clamped = min(max(value, 0), 1)
+        audioPlayer.currentTime = audioPlayer.duration * clamped
+        currentTime = audioPlayer.currentTime
+        duration = audioPlayer.duration
+        progress = clamped
+    }
+
+    func dismissFloatingPlaybackHUD() {
+        isFloatingPlaybackHUDDismissed = true
+        floatingPlaybackHUD?.hide()
+    }
+
+    func retryAccessibilityRead() {
+        hasRequestedAccessibilityPrompt = false
+        readSelectionOrClipboard()
     }
 
     func beginHotKeyCapture(for action: HotKeyAction) {
@@ -296,6 +422,17 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         detail = "Hotkeys reset to defaults."
     }
 
+    func resetSettings() {
+        selectedVoice = Self.defaultVoice
+        speechSpeed = 1.0
+        usesClipboardFallback = true
+        UserDefaults.standard.set(selectedVoice, forKey: Self.voiceDefaultsKey)
+        UserDefaults.standard.set(speechSpeed, forKey: Self.speedDefaultsKey)
+        UserDefaults.standard.set(usesClipboardFallback, forKey: Self.clipboardFallbackDefaultsKey)
+        resetHotKeys()
+        detail = "Settings reset."
+    }
+
     func openAccessibilitySettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
@@ -305,10 +442,19 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     func togglePause() {
         guard let audioPlayer else { return }
         if audioPlayer.isPlaying {
+            playbackCompletionTimer?.invalidate()
+            playbackCompletionTimer = nil
             audioPlayer.pause()
             status = .paused
             detail = "Playback paused."
         } else {
+            playbackCompletionTimer?.invalidate()
+            playbackCompletionTimer = nil
+            if audioPlayer.duration > 0, audioPlayer.currentTime >= audioPlayer.duration - 0.05 {
+                audioPlayer.currentTime = 0
+                currentTime = 0
+                progress = 0
+            }
             audioPlayer.play()
             status = .playing
             detail = "Playing generated audio."
@@ -331,11 +477,29 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         audioPlayer?.stop()
         audioPlayer = nil
         currentAudioPath = nil
+        playbackCompletionTimer?.invalidate()
+        playbackCompletionTimer = nil
         progressTimer?.invalidate()
         progressTimer = nil
         progress = 0
         currentTime = 0
         duration = 0
+        progressText = ""
+        currentAudioPreview = ""
+    }
+
+    private func syncFloatingPlaybackHUD() {
+        guard !isFloatingPlaybackHUDDismissed else {
+            floatingPlaybackHUD?.hide()
+            return
+        }
+
+        switch status {
+        case .generating, .playing, .paused:
+            floatingPlaybackHUD?.show()
+        default:
+            floatingPlaybackHUD?.hide()
+        }
     }
 
     var isBusyOrPlaying: Bool {
@@ -713,13 +877,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private func synthesizeAndPlay(_ text: String) {
         activeRequestID += 1
         let requestID = activeRequestID
+        isFloatingPlaybackHUDDismissed = false
         stopCurrentWork()
 
         status = .generating
         progress = 0
         currentTime = 0
         duration = 0
+        progressText = "Generating speech..."
         detail = "Preparing speech..."
+        currentAudioPreview = Self.textPreview(for: text)
 
         Task {
             do {
@@ -744,6 +911,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func synthesize(text: String, requestID: Int) async throws -> SynthesisResult {
+        progress = 0
+        progressText = "Generating speech..."
         let worker = try startSynthesisWorkerIfNeeded()
         synthesisIsGenerating = true
         synthesisIdleTimer?.invalidate()
@@ -765,6 +934,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         requestData.append(0x0A)
 
         worker.input.write(requestData)
+        progressText = "Generating speech..."
 
         let responseData = try await readWorkerResponse(from: worker.output)
         let response = try JSONDecoder().decode(SynthesisWorkerResponse.self, from: responseData)
@@ -918,11 +1088,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
 
         let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+        playbackCompletionTimer?.invalidate()
+        playbackCompletionTimer = nil
         currentAudioPath = path
         audioPlayer = player
         player.delegate = self
         player.prepareToPlay()
         duration = player.duration > 0 ? player.duration : durationHint
+        currentTime = 0
+        progress = 0
+        progressText = ""
         player.play()
         status = .playing
         detail = "Playing generated audio."
@@ -1015,7 +1190,28 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         Task { @MainActor in
             guard let audioPlayer = self.audioPlayer,
                   ObjectIdentifier(audioPlayer) == finishedPlayerID else { return }
-            self.stop()
+            self.progressTimer?.invalidate()
+            self.progressTimer = nil
+            self.currentTime = audioPlayer.duration
+            self.duration = audioPlayer.duration
+            self.progress = 1
+            self.status = .paused
+            self.detail = "Playback finished."
+            self.schedulePlaybackCompletionCleanup(for: finishedPlayerID)
+        }
+    }
+
+    private func schedulePlaybackCompletionCleanup(for playerID: ObjectIdentifier) {
+        playbackCompletionTimer?.invalidate()
+        playbackCompletionTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self,
+                      let audioPlayer = self.audioPlayer,
+                      ObjectIdentifier(audioPlayer) == playerID,
+                      !audioPlayer.isPlaying,
+                      self.status == .paused else { return }
+                self.stop()
+            }
         }
     }
 }
@@ -1023,12 +1219,27 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 private extension SpeechController {
     static let synthesisWarmIdleInterval: TimeInterval = 120
     static let maxCachedAudioFiles = 10
+    static let defaultVoice = "af_heart"
     static let voiceDefaultsKey = "settings.voice"
     static let speedDefaultsKey = "settings.speed"
     static let clipboardFallbackDefaultsKey = "settings.clipboardFallback"
 
     static func clampedSpeed(_ speed: Double) -> Double {
         min(max(speed, 0.5), 2.0)
+    }
+
+    static func textPreview(for text: String) -> String {
+        let normalized = text
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+
+        guard !normalized.isEmpty else { return "" }
+        if normalized.count <= 96 {
+            return normalized
+        }
+
+        return String(normalized.prefix(96)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
     static func cacheFileName(for text: String) -> String {
