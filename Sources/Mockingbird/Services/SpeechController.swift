@@ -22,6 +22,12 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var setupFailed: Bool = false
 
     private var synthesisProcess: Process?
+    private var synthesisInput: FileHandle?
+    private var synthesisOutput: FileHandle?
+    private var synthesisError: FileHandle?
+    private var synthesisIdleTimer: Timer?
+    private var synthesisIsGenerating = false
+    private var synthesisErrorLines: [String] = []
     private var progressTimer: Timer?
     private var requestPollTimer: Timer?
     private var audioPlayer: AVAudioPlayer?
@@ -235,8 +241,11 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func stopCurrentWork() {
-        synthesisProcess?.terminate()
-        synthesisProcess = nil
+        if synthesisIsGenerating {
+            terminateSynthesisWorker()
+        } else {
+            scheduleSynthesisWorkerShutdown()
+        }
         audioPlayer?.stop()
         audioPlayer = nil
         currentAudioPath = nil
@@ -644,62 +653,171 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func synthesize(text: String, requestID: Int) async throws -> SynthesisResult {
-        try await withCheckedThrowingContinuation { continuation in
-            let output = Pipe()
-            let errorOutput = Pipe()
-            let input = Pipe()
-            let process = Process()
-            process.executableURL = MockingbirdPaths.python
-            process.arguments = [
-                MockingbirdPaths.synthesizer.path,
-                "--voice",
-                selectedVoice,
-                "--speed",
-                String(format: "%.2f", speechSpeed)
-            ]
-            process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
-            process.standardInput = input
-            process.standardOutput = output
-            process.standardError = errorOutput
-            synthesisProcess = process
+        let worker = try startSynthesisWorkerIfNeeded()
+        synthesisIsGenerating = true
+        synthesisIdleTimer?.invalidate()
+        synthesisIdleTimer = nil
 
-            process.terminationHandler = { process in
-                let data = output.fileHandleForReading.readDataToEndOfFile()
-                let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
-                Task { @MainActor in
-                    if self.isCurrentRequest(requestID) {
-                        self.synthesisProcess = nil
-                    }
-                    if process.terminationStatus == 0 {
-                        do {
-                            continuation.resume(returning: try JSONDecoder().decode(SynthesisResult.self, from: data))
-                        } catch {
-                            continuation.resume(throwing: error)
-                        }
-                    } else {
-                        let stderr = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                        continuation.resume(throwing: NSError(
-                            domain: "Mockingbird",
-                            code: Int(process.terminationStatus),
-                            userInfo: [NSLocalizedDescriptionKey: stderr?.isEmpty == false ? stderr! : "Speech process exited with code \(process.terminationStatus)."]
-                        ))
-                    }
-                }
-            }
-
-            do {
-                try process.run()
-                if let data = text.data(using: .utf8) {
-                    input.fileHandleForWriting.write(data)
-                }
-                input.fileHandleForWriting.closeFile()
-            } catch {
-                if isCurrentRequest(requestID) {
-                    synthesisProcess = nil
-                }
-                continuation.resume(throwing: error)
+        defer {
+            synthesisIsGenerating = false
+            if isCurrentRequest(requestID) {
+                scheduleSynthesisWorkerShutdown()
             }
         }
+
+        let request = SynthesisWorkerRequest(
+            text: text,
+            voice: selectedVoice,
+            speed: speechSpeed
+        )
+        var requestData = try JSONEncoder().encode(request)
+        requestData.append(0x0A)
+
+        worker.input.write(requestData)
+
+        let responseData = try await readWorkerResponse(from: worker.output)
+        let response = try JSONDecoder().decode(SynthesisWorkerResponse.self, from: responseData)
+
+        guard response.ok else {
+            throw NSError(
+                domain: "Mockingbird",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: response.error ?? latestSynthesisError()]
+            )
+        }
+
+        guard let path = response.path, let duration = response.duration else {
+            throw NSError(
+                domain: "Mockingbird",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Speech worker returned an incomplete response."]
+            )
+        }
+
+        return SynthesisResult(path: path, duration: duration)
+    }
+
+    private func startSynthesisWorkerIfNeeded() throws -> SynthesisWorkerHandles {
+        if let process = synthesisProcess,
+           process.isRunning,
+           let input = synthesisInput,
+           let output = synthesisOutput {
+            return SynthesisWorkerHandles(input: input, output: output)
+        }
+
+        terminateSynthesisWorker()
+        synthesisErrorLines = []
+
+        let input = Pipe()
+        let output = Pipe()
+        let error = Pipe()
+        let process = Process()
+        process.executableURL = MockingbirdPaths.python
+        process.arguments = [MockingbirdPaths.synthesizer.path, "--worker"]
+        process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = error
+
+        error.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty,
+                  let text = String(data: data, encoding: .utf8) else { return }
+            Task { @MainActor in
+                self?.appendSynthesisErrorOutput(text)
+            }
+        }
+
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor in
+                guard self?.synthesisProcess === process else { return }
+                self?.clearSynthesisWorkerHandles()
+            }
+        }
+
+        try process.run()
+
+        synthesisProcess = process
+        synthesisInput = input.fileHandleForWriting
+        synthesisOutput = output.fileHandleForReading
+        synthesisError = error.fileHandleForReading
+
+        return SynthesisWorkerHandles(
+            input: input.fileHandleForWriting,
+            output: output.fileHandleForReading
+        )
+    }
+
+    private func readWorkerResponse(from output: FileHandle) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var line = Data()
+
+                while true {
+                    let byte = output.readData(ofLength: 1)
+                    if byte.isEmpty {
+                        continuation.resume(throwing: NSError(
+                            domain: "Mockingbird",
+                            code: 4,
+                            userInfo: [NSLocalizedDescriptionKey: "Speech worker stopped before returning audio."]
+                        ))
+                        return
+                    }
+
+                    if byte.first == 0x0A {
+                        continuation.resume(returning: line)
+                        return
+                    }
+
+                    line.append(byte)
+                }
+            }
+        }
+    }
+
+    private func scheduleSynthesisWorkerShutdown() {
+        guard synthesisProcess?.isRunning == true, !synthesisIsGenerating else { return }
+        synthesisIdleTimer?.invalidate()
+        synthesisIdleTimer = Timer.scheduledTimer(withTimeInterval: Self.synthesisWarmIdleInterval, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.synthesisIsGenerating else { return }
+                self.terminateSynthesisWorker()
+            }
+        }
+    }
+
+    private func terminateSynthesisWorker() {
+        synthesisIdleTimer?.invalidate()
+        synthesisIdleTimer = nil
+
+        if synthesisProcess?.isRunning == true {
+            synthesisProcess?.terminate()
+        }
+
+        clearSynthesisWorkerHandles()
+    }
+
+    private func clearSynthesisWorkerHandles() {
+        synthesisError?.readabilityHandler = nil
+        synthesisInput = nil
+        synthesisOutput = nil
+        synthesisError = nil
+        synthesisProcess = nil
+        synthesisIsGenerating = false
+    }
+
+    private func appendSynthesisErrorOutput(_ text: String) {
+        let lines = text
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard !lines.isEmpty else { return }
+        synthesisErrorLines = Array((synthesisErrorLines + lines).suffix(8))
+    }
+
+    private func latestSynthesisError() -> String {
+        synthesisErrorLines.last ?? "Speech worker could not generate audio."
     }
 
     private func playAudio(at path: String, durationHint: TimeInterval, requestID: Int) throws {
@@ -794,6 +912,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 }
 
 private extension SpeechController {
+    static let synthesisWarmIdleInterval: TimeInterval = 120
     static let maxCachedAudioFiles = 10
     static let voiceDefaultsKey = "settings.voice"
     static let speedDefaultsKey = "settings.speed"
@@ -818,6 +937,24 @@ struct AudioCacheEntry: Identifiable, Equatable {
 
     var id: String { url.path }
     var fileName: String { url.lastPathComponent }
+}
+
+private struct SynthesisWorkerHandles {
+    let input: FileHandle
+    let output: FileHandle
+}
+
+private struct SynthesisWorkerRequest: Encodable {
+    let text: String
+    let voice: String
+    let speed: Double
+}
+
+private struct SynthesisWorkerResponse: Decodable {
+    let ok: Bool
+    let path: String?
+    let duration: TimeInterval?
+    let error: String?
 }
 
 private struct SynthesisResult: Decodable {

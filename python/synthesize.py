@@ -42,13 +42,15 @@ def clean_text(text: str) -> str:
     return markdown_to_speech(text).strip()
 
 
-def synthesize(text: str, voice: str, speed: float) -> dict:
+def synthesize(text: str, voice: str, speed: float, pipeline: KPipeline | None = None) -> dict:
     start = time.time()
     cleaned = clean_text(text)
     if not cleaned:
         raise ValueError("No readable text was provided.")
 
-    pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+    if pipeline is None:
+        pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+
     chunks = []
     for _, _, audio in pipeline(cleaned, voice=voice, speed=speed):
         chunks.append(np.asarray(audio, dtype=np.float32))
@@ -69,12 +71,39 @@ def synthesize(text: str, voice: str, speed: float) -> dict:
     }
 
 
+def run_worker() -> int:
+    pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            request = json.loads(line)
+            result = synthesize(
+                request.get("text", ""),
+                request.get("voice", DEFAULT_VOICE),
+                float(request.get("speed", DEFAULT_SPEED)),
+                pipeline=pipeline,
+            )
+            print(json.dumps({"ok": True, **result}), flush=True)
+        except Exception as error:
+            print(json.dumps({"ok": False, "error": str(error)}), flush=True)
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--voice", default=DEFAULT_VOICE)
     parser.add_argument("--speed", type=float, default=DEFAULT_SPEED)
+    parser.add_argument("--worker", action="store_true")
     parser.add_argument("text", nargs="*")
     args = parser.parse_args()
+
+    if args.worker:
+        return run_worker()
 
     text = " ".join(args.text).strip() or sys.stdin.read()
     print(json.dumps(synthesize(text, args.voice, args.speed)), flush=True)
