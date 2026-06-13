@@ -31,6 +31,13 @@ struct MockingbirdMenuView: View {
             footer
         }
         .padding(16)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            controller.cancelHotKeyCapture()
+        }
+        .onDisappear {
+            controller.cancelHotKeyCapture()
+        }
     }
 
     private var header: some View {
@@ -49,16 +56,6 @@ struct MockingbirdMenuView: View {
             }
 
             Spacer()
-
-            Button {
-                controller.performPrimaryAction()
-            } label: {
-                Image(systemName: headerActionIcon)
-                    .frame(width: 24, height: 24)
-            }
-            .buttonStyle(.borderless)
-            .help(headerActionHelp)
-            .disabled(!controller.canUsePrimaryAction)
         }
     }
 
@@ -147,32 +144,59 @@ struct MockingbirdMenuView: View {
                 disclosureButton(title: "Shortcuts", count: nil, isExpanded: $isShortcutsExpanded)
 
                 if isShortcutsExpanded {
-                    Button("Reset") {
+                    Button {
                         controller.resetHotKeys()
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .frame(width: 22, height: 22)
                     }
-                    .font(.caption)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Reset Shortcuts")
                 }
             }
 
             if isShortcutsExpanded {
-                ForEach(HotKeyAction.allCases) { action in
-                    HStack {
-                        Text(action.title)
-                            .font(.caption)
-                        Spacer()
-                        Text(controller.hotKeyLabel(for: action))
-                            .font(.caption.monospaced())
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
-
-                        Button(controller.capturingHotKey == action ? "Press keys..." : "Change") {
-                            controller.beginHotKeyCapture(for: action)
-                        }
-                        .font(.caption)
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(HotKeyAction.allCases) { action in
+                        shortcutRow(action)
                     }
                 }
+                .padding(.top, 2)
             }
+        }
+    }
+
+    private func shortcutRow(_ action: HotKeyAction) -> some View {
+        let isCapturing = controller.capturingHotKey == action
+
+        return HStack(spacing: 8) {
+            Text(action.title)
+                .font(.caption)
+                .lineLimit(1)
+
+            Spacer()
+
+            Button {
+                controller.beginHotKeyCapture(for: action)
+            } label: {
+                Text(isCapturing ? "" : controller.hotKeyLabel(for: action))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .frame(minWidth: 82, minHeight: 23)
+                    .background {
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(isCapturing ? AnyShapeStyle(.clear) : AnyShapeStyle(.quaternary))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .strokeBorder(isCapturing ? Color.accentColor.opacity(0.7) : .clear, lineWidth: 1)
+                    }
+            }
+            .buttonStyle(.plain)
+            .help(isCapturing ? "Cancel Shortcut Change" : "Change Shortcut")
         }
     }
 
@@ -183,10 +207,10 @@ struct MockingbirdMenuView: View {
             Button {
                 NSApp.terminate(nil)
             } label: {
-                Label("Quit", systemImage: "power")
-                    .labelStyle(.titleAndIcon)
+                Image(systemName: "power")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
             .help("Quit Mockingbird")
@@ -286,37 +310,52 @@ struct MockingbirdMenuView: View {
     }
 
     private var statusSurface: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(format(controller.currentTime))
-                Spacer()
-                Text(format(controller.duration))
+        HStack(alignment: .bottom, spacing: 10) {
+            Button {
+                performTransportAction()
+            } label: {
+                Image(systemName: transportIcon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 24, height: 24)
             }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
+            .buttonStyle(.borderless)
+            .help(transportHelp)
+            .disabled(!canUseTransport)
 
-            ProgressView(value: controller.progress)
-                .opacity(controller.status == .generating ? 0.45 : 1)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(format(controller.currentTime))
+                    Spacer()
+                    Text(format(controller.duration))
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+                ProgressView(value: controller.progress)
+                    .opacity(controller.status == .generating ? 0.45 : 1)
+            }
         }
     }
 
     private func cacheRow(_ entry: AudioCacheEntry) -> some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(formatFull(entry.createdAt))
-                    .font(.caption)
-                    .lineLimit(1)
-
                 HStack(spacing: 6) {
+                    Text(entry.title)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
                     if let duration = entry.duration {
                         Text(format(duration))
+                            .foregroundStyle(.secondary)
                     }
-                    Text(entry.fileName)
-                        .truncationMode(.middle)
                 }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .font(.caption)
+
+                Text(formatFull(entry.createdAt))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Spacer()
@@ -356,24 +395,50 @@ struct MockingbirdMenuView: View {
         .buttonStyle(.plain)
     }
 
-    private var headerActionIcon: String {
-        if controller.setupFailed {
-            return "arrow.clockwise"
-        }
-        if controller.isBusyOrPlaying {
+    private var transportIcon: String {
+        switch controller.status {
+        case .generating:
             return "stop.fill"
+        case .playing:
+            return "pause.fill"
+        case .paused:
+            return "play.fill"
+        default:
+            return "speaker.wave.2"
         }
-        return "speaker.wave.2"
     }
 
-    private var headerActionHelp: String {
-        if controller.setupFailed {
-            return "Retry Setup"
+    private var transportHelp: String {
+        switch controller.status {
+        case .generating:
+            return "Stop Generating"
+        case .playing:
+            return "Pause"
+        case .paused:
+            return "Resume"
+        default:
+            return "Read Selection"
         }
-        if controller.isBusyOrPlaying {
-            return "Stop"
+    }
+
+    private var canUseTransport: Bool {
+        switch controller.status {
+        case .starting:
+            return false
+        default:
+            return !controller.setupFailed
         }
-        return "Read Selection"
+    }
+
+    private func performTransportAction() {
+        switch controller.status {
+        case .generating:
+            controller.stop()
+        case .playing, .paused:
+            controller.togglePause()
+        default:
+            controller.readSelectionOrClipboard()
+        }
     }
 
     private func format(_ interval: TimeInterval) -> String {

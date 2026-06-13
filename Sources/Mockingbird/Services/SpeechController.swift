@@ -262,12 +262,15 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func beginHotKeyCapture(for action: HotKeyAction) {
+        if capturingHotKey == action {
+            cancelHotKeyCapture()
+            return
+        }
+
         capturingHotKey = action
         detail = "Press the new shortcut for \(action.title)."
 
-        if let localKeyMonitor {
-            NSEvent.removeMonitor(localKeyMonitor)
-        }
+        removeLocalKeyMonitor()
 
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             Task { @MainActor in
@@ -275,6 +278,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             }
             return nil
         }
+    }
+
+    func cancelHotKeyCapture() {
+        guard let action = capturingHotKey else { return }
+        capturingHotKey = nil
+        removeLocalKeyMonitor()
+        detail = "\(action.title) shortcut unchanged."
     }
 
     func resetHotKeys() {
@@ -520,7 +530,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                 return AudioCacheEntry(
                     url: url,
                     createdAt: date,
-                    duration: nil
+                    duration: audioDuration(for: url),
+                    title: Self.cacheDisplayTitle(for: url)
                 )
             }
             .sorted { lhs, rhs in
@@ -648,12 +659,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         registerHotKeys()
 
         capturingHotKey = nil
+        removeLocalKeyMonitor()
+
+        detail = "\(action.title) is now \(config.display)."
+    }
+
+    private func removeLocalKeyMonitor() {
         if let localKeyMonitor {
             NSEvent.removeMonitor(localKeyMonitor)
             self.localKeyMonitor = nil
         }
-
-        detail = "\(action.title) is now \(config.display)."
     }
 
     private func registerHotKeys() {
@@ -713,7 +728,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                     self.deleteAudio(at: result.path)
                     return
                 }
-                let cachedPath = try self.cacheGeneratedAudio(at: result.path)
+                let cachedPath = try self.cacheGeneratedAudio(at: result.path, for: text)
                 guard self.isCurrentRequest(requestID) else {
                     self.deleteAudio(at: cachedPath)
                     self.refreshAudioCache()
@@ -922,10 +937,10 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         try? FileManager.default.removeItem(atPath: path)
     }
 
-    private func cacheGeneratedAudio(at sourcePath: String) throws -> String {
+    private func cacheGeneratedAudio(at sourcePath: String, for text: String) throws -> String {
         prepareAudioCacheDirectory()
         let source = URL(fileURLWithPath: sourcePath)
-        let destination = MockingbirdPaths.audioCacheDirectory.appending(path: Self.cacheFileName())
+        let destination = availableCacheURL(for: Self.cacheFileName(for: text))
 
         do {
             try FileManager.default.moveItem(at: source, to: destination)
@@ -936,6 +951,10 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
         refreshAudioCache()
         return destination.path
+    }
+
+    private func availableCacheURL(for fileName: String) -> URL {
+        availableURL(for: fileName, in: MockingbirdPaths.audioCacheDirectory)
     }
 
     private func downloadsDirectory() throws -> URL {
@@ -951,6 +970,10 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func availableDownloadURL(for fileName: String, in directory: URL) -> URL {
+        availableURL(for: fileName, in: directory)
+    }
+
+    private func availableURL(for fileName: String, in directory: URL) -> URL {
         let fileURL = URL(fileURLWithPath: fileName)
         let base = fileURL.deletingPathExtension().lastPathComponent
         let ext = fileURL.pathExtension
@@ -963,6 +986,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
 
         return candidate
+    }
+
+    private func audioDuration(for url: URL) -> TimeInterval? {
+        guard let player = try? AVAudioPlayer(contentsOf: url),
+              player.duration.isFinite,
+              player.duration > 0 else {
+            return nil
+        }
+
+        return player.duration
     }
 
     private func startProgressTimer() {
@@ -998,12 +1031,64 @@ private extension SpeechController {
         min(max(speed, 0.5), 2.0)
     }
 
-    static func cacheFileName() -> String {
+    static func cacheFileName(for text: String) -> String {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let timestamp = formatter.string(from: Date())
-        let suffix = UUID().uuidString.prefix(8).lowercased()
-        return "mockingbird-\(timestamp)-\(suffix).mp3"
+        return "\(cacheTitleSlug(for: text))-\(timestamp).mp3"
+    }
+
+    static func cacheDisplayTitle(for url: URL) -> String {
+        var parts = url.deletingPathExtension().lastPathComponent
+            .split(separator: "-")
+            .map(String.init)
+
+        if parts.first == "mockingbird" {
+            return "Generated audio"
+        }
+
+        if parts.count >= 3,
+           parts[parts.count - 2].count == 8,
+           parts[parts.count - 1].count == 6,
+           parts[parts.count - 2].allSatisfy(\.isNumber),
+           parts[parts.count - 1].allSatisfy(\.isNumber) {
+            parts.removeLast(2)
+        } else if parts.count >= 4,
+                  parts[parts.count - 3].count == 8,
+                  parts[parts.count - 2].count == 6,
+                  parts[parts.count - 3].allSatisfy(\.isNumber),
+                  parts[parts.count - 2].allSatisfy(\.isNumber),
+                  parts[parts.count - 1].allSatisfy(\.isNumber) {
+            parts.removeLast(3)
+        }
+
+        let title = parts.joined(separator: " ")
+        return title.isEmpty ? "Generated audio" : title
+    }
+
+    private static func cacheTitleSlug(for text: String) -> String {
+        let folded = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+        let allowed = CharacterSet.alphanumerics
+        var slug = ""
+        var previousWasSeparator = false
+
+        for scalar in folded.unicodeScalars {
+            if allowed.contains(scalar) {
+                slug.unicodeScalars.append(scalar)
+                previousWasSeparator = false
+            } else if !previousWasSeparator {
+                slug.append("-")
+                previousWasSeparator = true
+            }
+        }
+
+        let trimmed = slug.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        let shortened = String(trimmed.prefix(42)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return shortened.isEmpty ? "selection" : shortened
     }
 }
 
@@ -1011,6 +1096,7 @@ struct AudioCacheEntry: Identifiable, Equatable {
     let url: URL
     let createdAt: Date
     let duration: TimeInterval?
+    let title: String
 
     var id: String { url.path }
     var fileName: String { url.lastPathComponent }
