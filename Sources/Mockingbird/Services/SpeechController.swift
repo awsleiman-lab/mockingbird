@@ -12,6 +12,9 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var detail: String = "Loading the local voice model."
     @Published var hotKeys: [HotKeyAction: HotKeyConfig] = [:]
     @Published var capturingHotKey: HotKeyAction?
+    @Published var selectedVoice: String
+    @Published var speechSpeed: Double
+    @Published var usesClipboardFallback: Bool
 
     private var synthesisProcess: Process?
     private var progressTimer: Timer?
@@ -22,9 +25,18 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private var localKeyMonitor: Any?
     private var hasRequestedAccessibilityPrompt = false
     private var activeRequestID = 0
+    let availableVoices = ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam", "am_michael"]
 
     override init() {
+        let defaults = UserDefaults.standard
+        selectedVoice = defaults.string(forKey: Self.voiceDefaultsKey) ?? "af_heart"
+        speechSpeed = Self.clampedSpeed(defaults.object(forKey: Self.speedDefaultsKey) as? Double ?? 1.0)
+        usesClipboardFallback = defaults.object(forKey: Self.clipboardFallbackDefaultsKey) as? Bool ?? true
         super.init()
+        if !availableVoices.contains(selectedVoice) {
+            selectedVoice = "af_heart"
+            defaults.set(selectedVoice, forKey: Self.voiceDefaultsKey)
+        }
         hotKeys = loadHotKeys()
         hotKeyManager = HotKeyManager { [weak self] action in
             Task { @MainActor in
@@ -107,10 +119,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             let copied = pasteboard.string(forType: .string) ?? ""
             snapshot.restore(to: pasteboard)
 
-            let text = copied.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (oldString ?? "") : copied
+            let copiedText = copied.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = copiedText.isEmpty && self.usesClipboardFallback ? (oldString ?? "") : copied
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 self.status = .error("No selected text or clipboard text.")
-                self.detail = "Select text or copy text, then use \(self.hotKeyLabel(for: .read))."
+                self.detail = self.usesClipboardFallback
+                    ? "Select text or copy text, then use \(self.hotKeyLabel(for: .read))."
+                    : "Select text, then use \(self.hotKeyLabel(for: .read))."
                 return
             }
 
@@ -120,6 +135,25 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     func hotKeyLabel(for action: HotKeyAction) -> String {
         hotKeys[action, default: .default(for: action)].display
+    }
+
+    func setVoice(_ voice: String) {
+        guard availableVoices.contains(voice) else { return }
+        selectedVoice = voice
+        UserDefaults.standard.set(voice, forKey: Self.voiceDefaultsKey)
+        detail = "Voice set to \(voice)."
+    }
+
+    func setSpeechSpeed(_ speed: Double) {
+        let clamped = Self.clampedSpeed(speed)
+        speechSpeed = clamped
+        UserDefaults.standard.set(clamped, forKey: Self.speedDefaultsKey)
+    }
+
+    func setClipboardFallback(_ isEnabled: Bool) {
+        usesClipboardFallback = isEnabled
+        UserDefaults.standard.set(isEnabled, forKey: Self.clipboardFallbackDefaultsKey)
+        detail = isEnabled ? "Clipboard fallback enabled." : "Clipboard fallback disabled."
     }
 
     func beginHotKeyCapture(for action: HotKeyAction) {
@@ -447,7 +481,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             let input = Pipe()
             let process = Process()
             process.executableURL = MockingbirdPaths.python
-            process.arguments = [MockingbirdPaths.synthesizer.path]
+            process.arguments = [
+                MockingbirdPaths.synthesizer.path,
+                "--voice",
+                selectedVoice,
+                "--speed",
+                String(format: "%.2f", speechSpeed)
+            ]
             process.currentDirectoryURL = MockingbirdPaths.root
             process.standardInput = input
             process.standardOutput = output
@@ -545,6 +585,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                   ObjectIdentifier(audioPlayer) == finishedPlayerID else { return }
             self.stop()
         }
+    }
+}
+
+private extension SpeechController {
+    static let voiceDefaultsKey = "settings.voice"
+    static let speedDefaultsKey = "settings.speed"
+    static let clipboardFallbackDefaultsKey = "settings.clipboardFallback"
+
+    static func clampedSpeed(_ speed: Double) -> Double {
+        min(max(speed, 0.5), 2.0)
     }
 }
 

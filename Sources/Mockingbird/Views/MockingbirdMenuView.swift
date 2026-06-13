@@ -52,6 +52,10 @@ struct MockingbirdMenuView: View {
 
             Divider()
 
+            settingsSection
+
+            Divider()
+
             hotKeySection
 
             Button("Quit Mockingbird") {
@@ -117,6 +121,50 @@ struct MockingbirdMenuView: View {
                     .font(.caption)
                 }
             }
+        }
+    }
+
+    private var settingsSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Voice")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Voice", selection: Binding(
+                get: { controller.selectedVoice },
+                set: { controller.setVoice($0) }
+            )) {
+                ForEach(controller.availableVoices, id: \.self) { voice in
+                    Text(voice).tag(voice)
+                }
+            }
+            .pickerStyle(.menu)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Speed")
+                        .font(.caption)
+                    Spacer()
+                    Text(String(format: "%.2fx", controller.speechSpeed))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Slider(
+                    value: Binding(
+                        get: { controller.speechSpeed },
+                        set: { controller.setSpeechSpeed($0) }
+                    ),
+                    in: 0.5...2.0,
+                    step: 0.05
+                )
+            }
+
+            Toggle("Use clipboard fallback", isOn: Binding(
+                get: { controller.usesClipboardFallback },
+                set: { controller.setClipboardFallback($0) }
+            ))
+            .font(.caption)
         }
     }
 
