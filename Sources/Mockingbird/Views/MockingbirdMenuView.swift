@@ -3,74 +3,32 @@ import SwiftUI
 struct MockingbirdMenuView: View {
     @ObservedObject var controller: SpeechController
     @State private var isCacheExpanded = false
+    @State private var isSetupDetailsExpanded = false
+    @State private var isShortcutsExpanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             header
-
-            if case let .error(message) = controller.status {
-                HStack {
-                    Text(message)
-                        .font(.callout)
-                        .foregroundStyle(.red)
-
-                    Spacer()
-
-                    if message.contains("Accessibility") {
-                        Button("Open Settings") {
-                            controller.openAccessibilitySettings()
-                        }
-                        .font(.caption)
-                    }
-                }
-            }
-
-            Text(controller.detail)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
 
             if controller.showsSetupPanel {
                 setupPanel
+            } else if case let .error(message) = controller.status {
+                errorPanel(message)
             }
 
             statusSurface
 
-            HStack(spacing: 10) {
-                Button {
-                    controller.readSelectionOrClipboard()
-                } label: {
-                    Label(controller.isBusyOrPlaying ? "Stop" : "Read Selection", systemImage: controller.isBusyOrPlaying ? "stop.fill" : "text.cursor")
-                }
-
-                Spacer()
-
-                Button {
-                    controller.togglePause()
-                } label: {
-                    Image(systemName: controller.status == .paused ? "play.fill" : "pause.fill")
-                }
-                .help(controller.status == .paused ? "Resume" : "Pause")
-                .disabled(!canPause)
-
-            }
+            voiceSection
 
             Divider()
 
-            settingsSection
+            librarySection
 
             Divider()
 
-            cacheSection
+            shortcutsSection
 
-            Divider()
-
-            hotKeySection
-
-            Button("Quit Mockingbird") {
-                NSApp.terminate(nil)
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            footer
         }
         .padding(16)
     }
@@ -85,69 +43,43 @@ struct MockingbirdMenuView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Mockingbird")
                     .font(.headline)
-                Text(controller.status.title)
+                Text(controller.engineStatusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            if controller.status == .generating || controller.status == .starting {
-                Image(systemName: "wand.and.sparkles")
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.secondary)
+            Button {
+                controller.performPrimaryAction()
+            } label: {
+                Image(systemName: headerActionIcon)
+                    .frame(width: 24, height: 24)
             }
+            .buttonStyle(.borderless)
+            .help(headerActionHelp)
+            .disabled(!controller.canUsePrimaryAction)
         }
     }
 
-    private var hotKeySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Hotkeys")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Reset") {
-                    controller.resetHotKeys()
-                }
-                .font(.caption)
-            }
-
-            ForEach(HotKeyAction.allCases) { action in
-                HStack {
-                    Text(action.title)
-                        .font(.caption)
-                    Spacer()
-                    Text(controller.hotKeyLabel(for: action))
-                        .font(.caption.monospaced())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
-
-                    Button(controller.capturingHotKey == action ? "Press keys..." : "Change") {
-                        controller.beginHotKeyCapture(for: action)
-                    }
-                    .font(.caption)
-                }
-            }
-        }
-    }
-
-    private var settingsSection: some View {
+    private var voiceSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Voice")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Picker("Voice", selection: Binding(
-                get: { controller.selectedVoice },
-                set: { controller.setVoice($0) }
-            )) {
-                ForEach(controller.availableVoices, id: \.self) { voice in
-                    Text(voice).tag(voice)
+            HStack {
+                Text("Voice")
+                    .font(.caption)
+                Spacer()
+                Picker("Voice", selection: Binding(
+                    get: { controller.selectedVoice },
+                    set: { controller.setVoice($0) }
+                )) {
+                    ForEach(controller.availableVoices, id: \.self) { voice in
+                        Text(voice).tag(voice)
+                    }
                 }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(width: 150)
             }
-            .pickerStyle(.menu)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -177,28 +109,23 @@ struct MockingbirdMenuView: View {
         }
     }
 
-    private var cacheSection: some View {
+    private var librarySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button {
-                isCacheExpanded.toggle()
-            } label: {
-                HStack {
-                    Image(systemName: isCacheExpanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                        .frame(width: 12)
+            HStack {
+                disclosureButton(
+                    title: "Cache",
+                    count: controller.audioCache.count,
+                    isExpanded: $isCacheExpanded
+                )
 
-                    Text("Cache")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    Text("\(controller.audioCache.count)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                Button {
+                    controller.openAudioCacheFolder()
+                } label: {
+                    Image(systemName: "folder")
                 }
+                .buttonStyle(.borderless)
+                .help("Open Cache Folder")
             }
-            .buttonStyle(.plain)
 
             if isCacheExpanded {
                 if controller.audioCache.isEmpty {
@@ -207,32 +134,64 @@ struct MockingbirdMenuView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(controller.audioCache) { entry in
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(entry.fileName)
-                                    .font(.caption.monospaced())
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-
-                                Text(format(entry.createdAt))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer()
-
-                            Button {
-                                controller.downloadCachedAudio(entry)
-                            } label: {
-                                Image(systemName: "arrow.down.circle")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Save to Downloads")
-                        }
+                        cacheRow(entry)
                     }
                 }
             }
         }
+    }
+
+    private var shortcutsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                disclosureButton(title: "Shortcuts", count: nil, isExpanded: $isShortcutsExpanded)
+
+                if isShortcutsExpanded {
+                    Button("Reset") {
+                        controller.resetHotKeys()
+                    }
+                    .font(.caption)
+                }
+            }
+
+            if isShortcutsExpanded {
+                ForEach(HotKeyAction.allCases) { action in
+                    HStack {
+                        Text(action.title)
+                            .font(.caption)
+                        Spacer()
+                        Text(controller.hotKeyLabel(for: action))
+                            .font(.caption.monospaced())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
+
+                        Button(controller.capturingHotKey == action ? "Press keys..." : "Change") {
+                            controller.beginHotKeyCapture(for: action)
+                        }
+                        .font(.caption)
+                    }
+                }
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Spacer()
+
+            Button {
+                NSApp.terminate(nil)
+            } label: {
+                Label("Quit", systemImage: "power")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Quit Mockingbird")
+        }
+        .padding(.top, 2)
     }
 
     private var setupPanel: some View {
@@ -259,18 +218,24 @@ struct MockingbirdMenuView: View {
                 .lineLimit(2)
 
             if !controller.setupLogLines.isEmpty {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(controller.setupLogLines, id: \.self) { line in
-                        Text(line)
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                VStack(alignment: .leading, spacing: 6) {
+                    disclosureButton(title: "Details", count: nil, isExpanded: $isSetupDetailsExpanded)
+
+                    if isSetupDetailsExpanded {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(controller.setupLogLines, id: \.self) { line in
+                                Text(line)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.tertiary, in: RoundedRectangle(cornerRadius: 6))
                     }
                 }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.tertiary, in: RoundedRectangle(cornerRadius: 6))
             }
 
             if controller.setupFailed {
@@ -290,11 +255,38 @@ struct MockingbirdMenuView: View {
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var statusSurface: some View {
+    private func errorPanel(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            ProgressView(value: controller.progress)
-                .opacity(controller.status == .generating ? 0.45 : 1)
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.red)
 
+                Text(message)
+                    .font(.callout.weight(.semibold))
+
+                Spacer()
+            }
+
+            Text(controller.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+
+            if message.contains("Accessibility") {
+                Button {
+                    controller.openAccessibilitySettings()
+                } label: {
+                    Label("Open Settings", systemImage: "gear")
+                }
+            }
+        }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var statusSurface: some View {
+        VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(format(controller.currentTime))
                 Spacer()
@@ -302,13 +294,86 @@ struct MockingbirdMenuView: View {
             }
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
+
+            ProgressView(value: controller.progress)
+                .opacity(controller.status == .generating ? 0.45 : 1)
         }
-        .padding(10)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private var canPause: Bool {
-        controller.status == .playing || controller.status == .paused
+    private func cacheRow(_ entry: AudioCacheEntry) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(formatFull(entry.createdAt))
+                    .font(.caption)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    if let duration = entry.duration {
+                        Text(format(duration))
+                    }
+                    Text(entry.fileName)
+                        .truncationMode(.middle)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+
+            Spacer()
+
+            Button {
+                controller.downloadCachedAudio(entry)
+            } label: {
+                Image(systemName: "arrow.down.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Save to Downloads")
+        }
+    }
+
+    private func disclosureButton(title: String, count: Int?, isExpanded: Binding<Bool>) -> some View {
+        Button {
+            isExpanded.wrappedValue.toggle()
+        } label: {
+            HStack {
+                Image(systemName: isExpanded.wrappedValue ? "chevron.down" : "chevron.right")
+                    .font(.caption)
+                    .frame(width: 12)
+
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if let count {
+                    Text("\(count)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var headerActionIcon: String {
+        if controller.setupFailed {
+            return "arrow.clockwise"
+        }
+        if controller.isBusyOrPlaying {
+            return "stop.fill"
+        }
+        return "speaker.wave.2"
+    }
+
+    private var headerActionHelp: String {
+        if controller.setupFailed {
+            return "Retry Setup"
+        }
+        if controller.isBusyOrPlaying {
+            return "Stop"
+        }
+        return "Read Selection"
     }
 
     private func format(_ interval: TimeInterval) -> String {
@@ -317,9 +382,10 @@ struct MockingbirdMenuView: View {
         return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
     }
 
-    private func format(_ date: Date) -> String {
+    private func formatFull(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.dateStyle = .none
+        formatter.doesRelativeDateFormatting = true
+        formatter.dateStyle = .short
         formatter.timeStyle = .short
         return formatter.string(from: date)
     }

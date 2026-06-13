@@ -95,6 +95,73 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
     }
 
+    var engineStatusText: String {
+        if isSettingUp {
+            return "Installing speech engine"
+        }
+        if setupFailed {
+            return "Setup needs attention"
+        }
+        if synthesisIsGenerating {
+            return "Warming voice"
+        }
+        if synthesisProcess?.isRunning == true {
+            return "Worker warm"
+        }
+
+        switch status {
+        case .generating:
+            return "Generating"
+        case .playing:
+            return "Playing"
+        case .paused:
+            return "Paused"
+        case .error:
+            return "Needs attention"
+        default:
+            return "Ready"
+        }
+    }
+
+    var primaryActionTitle: String {
+        if setupFailed {
+            return "Retry Setup"
+        }
+        if isSettingUp {
+            return "Setting Up"
+        }
+        switch status {
+        case .generating:
+            return "Stop Generating"
+        case .playing, .paused:
+            return "Stop Playback"
+        default:
+            return "Read Selection"
+        }
+    }
+
+    var primaryActionIcon: String {
+        if setupFailed {
+            return "arrow.clockwise"
+        }
+        if isSettingUp {
+            return "hourglass"
+        }
+        return isBusyOrPlaying ? "stop.fill" : "text.cursor"
+    }
+
+    var canUsePrimaryAction: Bool {
+        !isSettingUp
+    }
+
+    func performPrimaryAction() {
+        if setupFailed {
+            retrySetup()
+        } else {
+            readSelectionOrClipboard()
+        }
+    }
+
     func readClipboard() {
         let text = NSPasteboard.general.string(forType: .string) ?? ""
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -187,6 +254,11 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             status = .error("Could not download audio.")
             detail = error.localizedDescription
         }
+    }
+
+    func openAudioCacheFolder() {
+        prepareAudioCacheDirectory()
+        NSWorkspace.shared.open(MockingbirdPaths.audioCacheDirectory)
     }
 
     func beginHotKeyCapture(for action: HotKeyAction) {
@@ -445,7 +517,11 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             .compactMap { url in
                 let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
                 let date = values?.contentModificationDate ?? values?.creationDate ?? .distantPast
-                return AudioCacheEntry(url: url, createdAt: date)
+                return AudioCacheEntry(
+                    url: url,
+                    createdAt: date,
+                    duration: nil
+                )
             }
             .sorted { lhs, rhs in
                 if lhs.createdAt == rhs.createdAt {
@@ -934,6 +1010,7 @@ private extension SpeechController {
 struct AudioCacheEntry: Identifiable, Equatable {
     let url: URL
     let createdAt: Date
+    let duration: TimeInterval?
 
     var id: String { url.path }
     var fileName: String { url.lastPathComponent }
