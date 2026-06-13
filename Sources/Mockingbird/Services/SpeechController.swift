@@ -15,6 +15,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var selectedVoice: String
     @Published var speechSpeed: Double
     @Published var usesClipboardFallback: Bool
+    @Published var audioCache: [AudioCacheEntry] = []
 
     private var synthesisProcess: Process?
     private var progressTimer: Timer?
@@ -45,6 +46,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
         registerHotKeys()
         prepareRequestDirectory()
+        prepareAudioCacheDirectory()
+        refreshAudioCache()
         startRequestWatcher()
         bootstrapAndStart()
     }
@@ -156,6 +159,25 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         detail = isEnabled ? "Clipboard fallback enabled." : "Clipboard fallback disabled."
     }
 
+    func downloadCachedAudio(_ entry: AudioCacheEntry) {
+        guard FileManager.default.fileExists(atPath: entry.url.path) else {
+            refreshAudioCache()
+            status = .error("Cached audio is missing.")
+            detail = "That audio file is no longer available."
+            return
+        }
+
+        do {
+            let downloads = try downloadsDirectory()
+            let destination = availableDownloadURL(for: entry.url.lastPathComponent, in: downloads)
+            try FileManager.default.copyItem(at: entry.url, to: destination)
+            detail = "Saved \(destination.lastPathComponent) to Downloads."
+        } catch {
+            status = .error("Could not download audio.")
+            detail = error.localizedDescription
+        }
+    }
+
     func beginHotKeyCapture(for action: HotKeyAction) {
         capturingHotKey = action
         detail = "Press the new shortcut for \(action.title)."
@@ -202,24 +224,22 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     func stop() {
         activeRequestID += 1
-        stopCurrentWork(deleteAudio: true)
+        stopCurrentWork()
         status = .ready
         detail = "Ready for selected text."
     }
 
-    private func stopCurrentWork(deleteAudio: Bool) {
+    private func stopCurrentWork() {
         synthesisProcess?.terminate()
         synthesisProcess = nil
         audioPlayer?.stop()
         audioPlayer = nil
+        currentAudioPath = nil
         progressTimer?.invalidate()
         progressTimer = nil
         progress = 0
         currentTime = 0
         duration = 0
-        if deleteAudio {
-            deleteCurrentAudio()
-        }
     }
 
     var isBusyOrPlaying: Bool {
@@ -281,6 +301,47 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             at: MockingbirdPaths.requestDirectory,
             withIntermediateDirectories: true
         )
+    }
+
+    private func prepareAudioCacheDirectory() {
+        try? FileManager.default.createDirectory(
+            at: MockingbirdPaths.audioCacheDirectory,
+            withIntermediateDirectories: true
+        )
+    }
+
+    private func refreshAudioCache() {
+        prepareAudioCacheDirectory()
+        let entries = cachedAudioEntries()
+        let retained = Array(entries.prefix(Self.maxCachedAudioFiles))
+        for entry in entries.dropFirst(Self.maxCachedAudioFiles) {
+            try? FileManager.default.removeItem(at: entry.url)
+        }
+        audioCache = retained
+    }
+
+    private func cachedAudioEntries() -> [AudioCacheEntry] {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: MockingbirdPaths.audioCacheDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .creationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return urls
+            .filter { $0.pathExtension.lowercased() == "mp3" }
+            .compactMap { url in
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
+                let date = values?.contentModificationDate ?? values?.creationDate ?? .distantPast
+                return AudioCacheEntry(url: url, createdAt: date)
+            }
+            .sorted { lhs, rhs in
+                if lhs.createdAt == rhs.createdAt {
+                    return lhs.url.lastPathComponent > rhs.url.lastPathComponent
+                }
+                return lhs.createdAt > rhs.createdAt
+            }
     }
 
     private func startRequestWatcher() {
@@ -450,7 +511,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private func synthesizeAndPlay(_ text: String) {
         activeRequestID += 1
         let requestID = activeRequestID
-        stopCurrentWork(deleteAudio: true)
+        stopCurrentWork()
 
         status = .generating
         progress = 0
@@ -465,7 +526,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                     self.deleteAudio(at: result.path)
                     return
                 }
-                try playAudio(at: result.path, durationHint: result.duration, requestID: requestID)
+                let cachedPath = try self.cacheGeneratedAudio(at: result.path)
+                guard self.isCurrentRequest(requestID) else {
+                    self.deleteAudio(at: cachedPath)
+                    self.refreshAudioCache()
+                    return
+                }
+                try playAudio(at: cachedPath, durationHint: result.duration, requestID: requestID)
             } catch {
                 guard self.isCurrentRequest(requestID) else { return }
                 status = .error("Could not generate audio.")
@@ -540,7 +607,6 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
 
         let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
-        deleteCurrentAudio()
         currentAudioPath = path
         audioPlayer = player
         player.delegate = self
@@ -556,14 +622,51 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         activeRequestID == requestID
     }
 
-    private func deleteCurrentAudio() {
-        guard let path = currentAudioPath else { return }
-        currentAudioPath = nil
-        deleteAudio(at: path)
-    }
-
     private func deleteAudio(at path: String) {
         try? FileManager.default.removeItem(atPath: path)
+    }
+
+    private func cacheGeneratedAudio(at sourcePath: String) throws -> String {
+        prepareAudioCacheDirectory()
+        let source = URL(fileURLWithPath: sourcePath)
+        let destination = MockingbirdPaths.audioCacheDirectory.appending(path: Self.cacheFileName())
+
+        do {
+            try FileManager.default.moveItem(at: source, to: destination)
+        } catch {
+            try FileManager.default.copyItem(at: source, to: destination)
+            try? FileManager.default.removeItem(at: source)
+        }
+
+        refreshAudioCache()
+        return destination.path
+    }
+
+    private func downloadsDirectory() throws -> URL {
+        if let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first {
+            return downloads
+        }
+
+        throw NSError(
+            domain: "Mockingbird",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Could not locate your Downloads folder."]
+        )
+    }
+
+    private func availableDownloadURL(for fileName: String, in directory: URL) -> URL {
+        let fileURL = URL(fileURLWithPath: fileName)
+        let base = fileURL.deletingPathExtension().lastPathComponent
+        let ext = fileURL.pathExtension
+        var candidate = directory.appending(path: fileName)
+        var index = 2
+
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = directory.appending(path: "\(base)-\(index).\(ext)")
+            index += 1
+        }
+
+        return candidate
     }
 
     private func startProgressTimer() {
@@ -589,6 +692,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 }
 
 private extension SpeechController {
+    static let maxCachedAudioFiles = 10
     static let voiceDefaultsKey = "settings.voice"
     static let speedDefaultsKey = "settings.speed"
     static let clipboardFallbackDefaultsKey = "settings.clipboardFallback"
@@ -596,6 +700,22 @@ private extension SpeechController {
     static func clampedSpeed(_ speed: Double) -> Double {
         min(max(speed, 0.5), 2.0)
     }
+
+    static func cacheFileName() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let timestamp = formatter.string(from: Date())
+        let suffix = UUID().uuidString.prefix(8).lowercased()
+        return "mockingbird-\(timestamp)-\(suffix).mp3"
+    }
+}
+
+struct AudioCacheEntry: Identifiable, Equatable {
+    let url: URL
+    let createdAt: Date
+
+    var id: String { url.path }
+    var fileName: String { url.lastPathComponent }
 }
 
 private struct SynthesisResult: Decodable {

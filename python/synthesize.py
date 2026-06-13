@@ -57,12 +57,12 @@ def synthesize(text: str, voice: str, speed: float) -> dict:
         raise RuntimeError("The speech engine did not produce audio.")
 
     audio = np.concatenate(chunks)
-    with tempfile.NamedTemporaryFile(prefix="mockingbird-", suffix=".wav", delete=False) as wav:
-        wav_path = wav.name
+    with tempfile.NamedTemporaryFile(prefix="mockingbird-", suffix=".mp3", delete=False) as mp3:
+        audio_path = mp3.name
 
-    sf.write(wav_path, audio, SAMPLE_RATE)
+    sf.write(audio_path, audio, SAMPLE_RATE, format="MP3")
     return {
-        "path": wav_path,
+        "path": audio_path,
         "duration": round(float(len(audio)) / SAMPLE_RATE, 3),
         "characters": len(cleaned),
         "elapsed": round(time.time() - start, 3),

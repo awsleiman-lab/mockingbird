@@ -4,6 +4,8 @@ build-cache/
 Mockingbird.app/
 runtime/requests/*
 !runtime/requests/.gitkeep
+runtime/audio-cache/*
+!runtime/audio-cache/.gitkeep
 .venv/
 *.pyc
 __pycache__/

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MockingbirdMenuView: View {
     @ObservedObject var controller: SpeechController
+    @State private var isCacheExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -53,6 +54,10 @@ struct MockingbirdMenuView: View {
             Divider()
 
             settingsSection
+
+            Divider()
+
+            cacheSection
 
             Divider()
 
@@ -168,6 +173,64 @@ struct MockingbirdMenuView: View {
         }
     }
 
+    private var cacheSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                isCacheExpanded.toggle()
+            } label: {
+                HStack {
+                    Image(systemName: isCacheExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption)
+                        .frame(width: 12)
+
+                    Text("Cache")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Text("\(controller.audioCache.count)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if isCacheExpanded {
+                if controller.audioCache.isEmpty {
+                    Text("No cached audio")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(controller.audioCache) { entry in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.fileName)
+                                    .font(.caption.monospaced())
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                Text(format(entry.createdAt))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Button {
+                                controller.downloadCachedAudio(entry)
+                            } label: {
+                                Image(systemName: "arrow.down.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Save to Downloads")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var statusSurface: some View {
         VStack(alignment: .leading, spacing: 8) {
             ProgressView(value: controller.progress)
@@ -193,5 +256,12 @@ struct MockingbirdMenuView: View {
         guard interval.isFinite, interval > 0 else { return "0:00" }
         let seconds = Int(interval.rounded())
         return "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+
+    private func format(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 }
