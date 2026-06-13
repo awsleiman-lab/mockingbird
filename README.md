@@ -1,11 +1,11 @@
 # Mockingbird
 
-Mockingbird is a self-contained macOS menu bar app that reads selected text aloud with local local TTS.
+Mockingbird is a self-contained macOS menu bar app that reads selected text aloud with local TTS.
 
 ## What It Owns
 
 - Global hotkeys, no Apple Shortcuts app required.
-- A warm local speech service while the app is open.
+- Cold-start synthesis: no Python speech process stays resident while idle.
 - First-run setup: if `.venv` is missing, Mockingbird runs `scripts/setup.sh` to install the speech engine and download model assets.
 - Menu bar controls for generation state, playback progress, pause/resume, stop, and editable hotkeys.
 
@@ -42,4 +42,4 @@ If `.venv` is not present, the app will install the speech engine on first launc
 
 ## Privacy
 
-Mockingbird does not listen to your microphone. It only reads selected text when you press the read hotkey. It runs a local service on `127.0.0.1:8765` while the app is open.
+Mockingbird does not listen to your microphone. It only reads selected text when you press the read hotkey. It launches a local Python speech process for each read, then that process exits.

@@ -20,7 +20,7 @@ enum MockingbirdPaths {
     }
 
     static let python = root.appending(path: ".venv/bin/python")
-    static let service = root.appending(path: "python/tts_service.py")
+    static let synthesizer = root.appending(path: "python/synthesize.py")
     static let requestDirectory = root.appending(path: "runtime/requests")
     static let setup = root.appending(path: "scripts/setup.sh")
     static let log = URL(fileURLWithPath: "/tmp/mockingbird.log")

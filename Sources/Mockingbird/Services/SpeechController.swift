@@ -13,14 +13,12 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var hotKeys: [HotKeyAction: HotKeyConfig] = [:]
     @Published var capturingHotKey: HotKeyAction?
 
-    private var serviceProcess: Process?
-    private var requestTimer: Timer?
+    private var synthesisProcess: Process?
     private var progressTimer: Timer?
     private var audioPlayer: AVAudioPlayer?
     private var hotKeyManager: HotKeyManager?
     private var localKeyMonitor: Any?
     private var hasRequestedAccessibilityPrompt = false
-    private let endpoint = URL(string: "http://127.0.0.1:8765")!
 
     override init() {
         super.init()
@@ -33,7 +31,6 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         registerHotKeys()
         prepareRequestDirectory()
         bootstrapAndStart()
-        startPollingRequests()
     }
 
     var menuTitle: String {
@@ -168,6 +165,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func stop() {
+        synthesisProcess?.terminate()
+        synthesisProcess = nil
         audioPlayer?.stop()
         audioPlayer = nil
         progressTimer?.invalidate()
@@ -185,7 +184,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     private func bootstrapAndStart() {
         if FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path) {
-            startService()
+            status = .ready
+            detail = "Ready for selected text."
             return
         }
 
@@ -195,7 +195,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         Task {
             do {
                 try await runSetup()
-                startService()
+                status = .ready
+                detail = "Ready for selected text."
             } catch {
                 status = .error("Speech engine setup failed.")
                 detail = error.localizedDescription
@@ -236,120 +237,6 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             at: MockingbirdPaths.requestDirectory,
             withIntermediateDirectories: true
         )
-    }
-
-    private func startService() {
-        if serviceProcess?.isRunning == true { return }
-
-        Task {
-            if await isServiceHealthy() {
-                status = .ready
-                detail = "Connected to the local speech service."
-                return
-            }
-
-            launchServiceProcess()
-        }
-    }
-
-    private func launchServiceProcess() {
-        let process = Process()
-        process.executableURL = MockingbirdPaths.python
-        process.arguments = [MockingbirdPaths.service.path, "--port", "8765"]
-        FileManager.default.createFile(atPath: MockingbirdPaths.log.path, contents: nil)
-        process.standardOutput = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
-        process.standardError = FileHandle(forWritingAtPath: MockingbirdPaths.log.path)
-
-        do {
-            try process.run()
-            serviceProcess = process
-            waitForHealth()
-        } catch {
-            status = .error("Could not start the speech engine.")
-            detail = error.localizedDescription
-        }
-    }
-
-    private func isServiceHealthy() async -> Bool {
-        do {
-            let health = endpoint.appending(path: "health")
-            let (_, response) = try await URLSession.shared.data(from: health)
-            return (response as? HTTPURLResponse)?.statusCode == 200
-        } catch {
-            return false
-        }
-    }
-
-    private func waitForHealth(attempt: Int = 0) {
-        guard attempt < 40 else {
-            status = .error("Speech service did not become ready.")
-            detail = "Open /tmp/mockingbird.log for details."
-            return
-        }
-
-        Task {
-            do {
-                let health = endpoint.appending(path: "health")
-                let (_, response) = try await URLSession.shared.data(from: health)
-                if (response as? HTTPURLResponse)?.statusCode == 200 {
-                    status = .ready
-                    detail = "Ready for selected text."
-                } else {
-                    retryHealth(attempt: attempt)
-                }
-            } catch {
-                retryHealth(attempt: attempt)
-            }
-        }
-    }
-
-    private func retryHealth(attempt: Int) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.waitForHealth(attempt: attempt + 1)
-        }
-    }
-
-    private func startPollingRequests() {
-        requestTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.consumeNextRequest()
-            }
-        }
-    }
-
-    private func consumeNextRequest() {
-        guard status != .generating else { return }
-
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: MockingbirdPaths.requestDirectory,
-            includingPropertiesForKeys: [.creationDateKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
-        guard let next = urls.sorted(by: { lhs, rhs in
-            let left = (try? lhs.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-            let right = (try? rhs.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-            return left < right
-        }).first else { return }
-
-        if next.lastPathComponent.hasPrefix("command-stop") {
-            try? FileManager.default.removeItem(at: next)
-            stop()
-            return
-        }
-
-        if next.lastPathComponent.hasPrefix("command-pause") {
-            try? FileManager.default.removeItem(at: next)
-            togglePause()
-            return
-        }
-
-        let text = (try? String(contentsOf: next, encoding: .utf8)) ?? ""
-        try? FileManager.default.removeItem(at: next)
-
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            synthesizeAndPlay(text)
-        }
     }
 
     private func performHotKeyAction(_ action: HotKeyAction) {
@@ -468,18 +355,52 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func synthesize(text: String) async throws -> SynthesisResult {
-        var request = URLRequest(url: endpoint.appending(path: "synthesize"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(SynthesisRequest(text: text))
+        try await withCheckedThrowingContinuation { continuation in
+            let output = Pipe()
+            let errorOutput = Pipe()
+            let input = Pipe()
+            let process = Process()
+            process.executableURL = MockingbirdPaths.python
+            process.arguments = [MockingbirdPaths.synthesizer.path]
+            process.currentDirectoryURL = MockingbirdPaths.root
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = errorOutput
+            synthesisProcess = process
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            let error = (try? JSONDecoder().decode(ServiceError.self, from: data).error) ?? "Unknown service error."
-            throw NSError(domain: "Mockingbird", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+            process.terminationHandler = { process in
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
+                Task { @MainActor in
+                    self.synthesisProcess = nil
+                    if process.terminationStatus == 0 {
+                        do {
+                            continuation.resume(returning: try JSONDecoder().decode(SynthesisResult.self, from: data))
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    } else {
+                        let stderr = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        continuation.resume(throwing: NSError(
+                            domain: "Mockingbird",
+                            code: Int(process.terminationStatus),
+                            userInfo: [NSLocalizedDescriptionKey: stderr?.isEmpty == false ? stderr! : "Speech process exited with code \(process.terminationStatus)."]
+                        ))
+                    }
+                }
+            }
+
+            do {
+                try process.run()
+                if let data = text.data(using: .utf8) {
+                    input.fileHandleForWriting.write(data)
+                }
+                input.fileHandleForWriting.closeFile()
+            } catch {
+                synthesisProcess = nil
+                continuation.resume(throwing: error)
+            }
         }
-
-        return try JSONDecoder().decode(SynthesisResult.self, from: data)
     }
 
     private func playAudio(at path: String, durationHint: TimeInterval) throws {
@@ -513,17 +434,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 }
 
-private struct SynthesisRequest: Encodable {
-    let text: String
-    let voice = "af_heart"
-    let speed = 1.0
-}
-
 private struct SynthesisResult: Decodable {
     let path: String
     let duration: TimeInterval
-}
-
-private struct ServiceError: Decodable {
-    let error: String
 }
