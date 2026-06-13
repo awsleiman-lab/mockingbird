@@ -9,6 +9,8 @@ mkdir -p "$CACHE"
 mkdir -p "$ROOT/AppBundle/Contents/Resources"
 
 cd "$ROOT"
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+CLANG_MODULE_CACHE_PATH="$CACHE" \
 swift "$ROOT/scripts/generate_icon.swift"
 iconutil -c icns "$ROOT/AppBundle/Contents/Resources/Mockingbird.iconset" -o "$ROOT/AppBundle/Contents/Resources/Mockingbird.icns"
 

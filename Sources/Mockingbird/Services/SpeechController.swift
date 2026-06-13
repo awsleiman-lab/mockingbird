@@ -15,10 +15,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     private var synthesisProcess: Process?
     private var progressTimer: Timer?
+    private var requestPollTimer: Timer?
     private var audioPlayer: AVAudioPlayer?
+    private var currentAudioPath: String?
     private var hotKeyManager: HotKeyManager?
     private var localKeyMonitor: Any?
     private var hasRequestedAccessibilityPrompt = false
+    private var activeRequestID = 0
 
     override init() {
         super.init()
@@ -30,6 +33,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
         registerHotKeys()
         prepareRequestDirectory()
+        startRequestWatcher()
         bootstrapAndStart()
     }
 
@@ -95,15 +99,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     private func copySelectionAndRead() {
         let pasteboard = NSPasteboard.general
-        let oldString = pasteboard.string(forType: .string)
+        let snapshot = PasteboardSnapshot.capture(from: pasteboard)
+        let oldString = snapshot.string
 
         sendCopyKeystroke()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             let copied = pasteboard.string(forType: .string) ?? ""
-            if let oldString {
-                pasteboard.clearContents()
-                pasteboard.setString(oldString, forType: .string)
-            }
+            snapshot.restore(to: pasteboard)
 
             let text = copied.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? (oldString ?? "") : copied
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -165,6 +167,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func stop() {
+        activeRequestID += 1
+        stopCurrentWork(deleteAudio: true)
+        status = .ready
+        detail = "Ready for selected text."
+    }
+
+    private func stopCurrentWork(deleteAudio: Bool) {
         synthesisProcess?.terminate()
         synthesisProcess = nil
         audioPlayer?.stop()
@@ -174,8 +183,9 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         progress = 0
         currentTime = 0
         duration = 0
-        status = .ready
-        detail = "Ready for selected text."
+        if deleteAudio {
+            deleteCurrentAudio()
+        }
     }
 
     var isBusyOrPlaying: Bool {
@@ -237,6 +247,74 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             at: MockingbirdPaths.requestDirectory,
             withIntermediateDirectories: true
         )
+    }
+
+    private func startRequestWatcher() {
+        requestPollTimer?.invalidate()
+        requestPollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.processPendingRequests()
+            }
+        }
+        processPendingRequests()
+    }
+
+    private func processPendingRequests() {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: MockingbirdPaths.requestDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let pending = urls
+            .filter { url in
+                let name = url.lastPathComponent
+                return name.hasPrefix("request-") || name.hasPrefix("command-pause-") || name.hasPrefix("command-stop-")
+            }
+            .sorted { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                if lhsDate == rhsDate {
+                    return lhs.lastPathComponent < rhs.lastPathComponent
+                }
+                return lhsDate < rhsDate
+            }
+
+        for url in pending {
+            handleRequestFile(at: url)
+        }
+    }
+
+    private func handleRequestFile(at url: URL) {
+        let name = url.lastPathComponent
+
+        if name.hasPrefix("command-stop-") {
+            try? FileManager.default.removeItem(at: url)
+            stop()
+            return
+        }
+
+        if name.hasPrefix("command-pause-") {
+            try? FileManager.default.removeItem(at: url)
+            togglePause()
+            return
+        }
+
+        guard name.hasPrefix("request-") else { return }
+        guard status != .starting else { return }
+
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        try? FileManager.default.removeItem(at: url)
+
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            status = .error("Request file was empty.")
+            detail = "No readable text was found in \(name)."
+            return
+        }
+
+        synthesizeAndPlay(text)
     }
 
     private func performHotKeyAction(_ action: HotKeyAction) {
@@ -336,25 +414,33 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func synthesizeAndPlay(_ text: String) {
+        activeRequestID += 1
+        let requestID = activeRequestID
+        stopCurrentWork(deleteAudio: true)
+
         status = .generating
         progress = 0
         currentTime = 0
         duration = 0
         detail = "Preparing speech..."
-        audioPlayer?.stop()
 
         Task {
             do {
-                let result = try await synthesize(text: text)
-                try playAudio(at: result.path, durationHint: result.duration)
+                let result = try await synthesize(text: text, requestID: requestID)
+                guard self.isCurrentRequest(requestID) else {
+                    self.deleteAudio(at: result.path)
+                    return
+                }
+                try playAudio(at: result.path, durationHint: result.duration, requestID: requestID)
             } catch {
+                guard self.isCurrentRequest(requestID) else { return }
                 status = .error("Could not generate audio.")
                 detail = error.localizedDescription
             }
         }
     }
 
-    private func synthesize(text: String) async throws -> SynthesisResult {
+    private func synthesize(text: String, requestID: Int) async throws -> SynthesisResult {
         try await withCheckedThrowingContinuation { continuation in
             let output = Pipe()
             let errorOutput = Pipe()
@@ -372,7 +458,9 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 let errorData = errorOutput.fileHandleForReading.readDataToEndOfFile()
                 Task { @MainActor in
-                    self.synthesisProcess = nil
+                    if self.isCurrentRequest(requestID) {
+                        self.synthesisProcess = nil
+                    }
                     if process.terminationStatus == 0 {
                         do {
                             continuation.resume(returning: try JSONDecoder().decode(SynthesisResult.self, from: data))
@@ -397,14 +485,23 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                 }
                 input.fileHandleForWriting.closeFile()
             } catch {
-                synthesisProcess = nil
+                if isCurrentRequest(requestID) {
+                    synthesisProcess = nil
+                }
                 continuation.resume(throwing: error)
             }
         }
     }
 
-    private func playAudio(at path: String, durationHint: TimeInterval) throws {
+    private func playAudio(at path: String, durationHint: TimeInterval, requestID: Int) throws {
+        guard isCurrentRequest(requestID) else {
+            deleteAudio(at: path)
+            return
+        }
+
         let player = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: path))
+        deleteCurrentAudio()
+        currentAudioPath = path
         audioPlayer = player
         player.delegate = self
         player.prepareToPlay()
@@ -413,6 +510,20 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         status = .playing
         detail = "Playing generated audio."
         startProgressTimer()
+    }
+
+    private func isCurrentRequest(_ requestID: Int) -> Bool {
+        activeRequestID == requestID
+    }
+
+    private func deleteCurrentAudio() {
+        guard let path = currentAudioPath else { return }
+        currentAudioPath = nil
+        deleteAudio(at: path)
+    }
+
+    private func deleteAudio(at path: String) {
+        try? FileManager.default.removeItem(atPath: path)
     }
 
     private func startProgressTimer() {
@@ -428,7 +539,10 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        let finishedPlayerID = ObjectIdentifier(player)
         Task { @MainActor in
+            guard let audioPlayer = self.audioPlayer,
+                  ObjectIdentifier(audioPlayer) == finishedPlayerID else { return }
             self.stop()
         }
     }
@@ -437,4 +551,43 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 private struct SynthesisResult: Decodable {
     let path: String
     let duration: TimeInterval
+}
+
+private struct PasteboardSnapshot {
+    private struct Entry {
+        let type: NSPasteboard.PasteboardType
+        let data: Data
+    }
+
+    private let items: [[Entry]]
+
+    var string: String? {
+        for item in items {
+            if let entry = item.first(where: { $0.type == .string }) {
+                return String(data: entry.data, encoding: .utf8)
+            }
+        }
+        return nil
+    }
+
+    static func capture(from pasteboard: NSPasteboard) -> PasteboardSnapshot {
+        let items = pasteboard.pasteboardItems?.map { item in
+            item.types.compactMap { type in
+                item.data(forType: type).map { Entry(type: type, data: $0) }
+            }
+        } ?? []
+        return PasteboardSnapshot(items: items)
+    }
+
+    func restore(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        let restoredItems = items.map { entries in
+            let item = NSPasteboardItem()
+            for entry in entries {
+                item.setData(entry.data, forType: entry.type)
+            }
+            return item
+        }
+        pasteboard.writeObjects(restoredItems)
+    }
 }
