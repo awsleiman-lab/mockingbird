@@ -41,6 +41,9 @@ struct MockingbirdMenuView: View {
         .onTapGesture {
             controller.cancelHotKeyCapture()
         }
+        .onAppear {
+            controller.refreshAccessibilityPermission()
+        }
         .onDisappear {
             controller.cancelHotKeyCapture()
         }
@@ -238,17 +241,17 @@ struct MockingbirdMenuView: View {
     private var accessibilityPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "hand.raised.fill")
+                Image(systemName: "accessibility")
                     .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
 
-                Text("Accessibility Needed")
+                Text("Accessibility Access")
                     .font(.callout.weight(.semibold))
 
                 Spacer()
             }
 
-            Text("Allow Mockingbird in Privacy & Security, then try reading again.")
+            Text("Allow Mockingbird in Privacy & Security so it can read selected text.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -261,9 +264,9 @@ struct MockingbirdMenuView: View {
                 }
 
                 Button {
-                    controller.retryAccessibilityRead()
+                    controller.refreshAccessibilityPermission()
                 } label: {
-                    Label("Try Again", systemImage: "arrow.clockwise")
+                    Label("Check Again", systemImage: "arrow.clockwise")
                 }
             }
         }

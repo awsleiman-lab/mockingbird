@@ -26,6 +26,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var setupFailed: Bool = false
     @Published var progressText: String = ""
     @Published var currentAudioPreview: String = ""
+    @Published private(set) var isAccessibilityPermissionGranted = AXIsProcessTrusted()
 
     private var synthesisProcess: Process?
     private var synthesisInput: FileHandle?
@@ -69,6 +70,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         prepareRequestDirectory()
         prepareAudioCacheDirectory()
         refreshAudioCache()
+        refreshAccessibilityPermission()
+        observeAppActivation()
         startRequestWatcher()
         bootstrapAndStart()
     }
@@ -128,11 +131,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     var needsAccessibilityPermission: Bool {
-        if case let .error(message) = status {
-            return message.contains("Accessibility")
-        }
-
-        return false
+        !isAccessibilityPermissionGranted
     }
 
     var primaryActionTitle: String {
@@ -390,6 +389,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         readSelectionOrClipboard()
     }
 
+    func refreshAccessibilityPermission() {
+        let isGranted = AXIsProcessTrusted()
+        isAccessibilityPermissionGranted = isGranted
+
+        if isGranted, case let .error(message) = status, message.contains("Accessibility") {
+            status = .ready
+            detail = "Accessibility access is ready."
+        }
+    }
+
     func beginHotKeyCapture(for action: HotKeyAction) {
         if capturingHotKey == action {
             cancelHotKeyCapture()
@@ -440,6 +449,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
+        scheduleAccessibilityPermissionChecks()
     }
 
     func togglePause() {
@@ -797,8 +807,29 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         keyUp?.post(tap: .cghidEventTap)
     }
 
+    private func observeAppActivation() {
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshAccessibilityPermission()
+            }
+        }
+    }
+
+    private func scheduleAccessibilityPermissionChecks() {
+        for delay in [0.5, 1.5, 3.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.refreshAccessibilityPermission()
+            }
+        }
+    }
+
     private func ensureAccessibilityPermission() -> Bool {
-        if AXIsProcessTrusted() {
+        refreshAccessibilityPermission()
+        if isAccessibilityPermissionGranted {
             return true
         }
 
@@ -810,7 +841,9 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         let options = [
             "AXTrustedCheckOptionPrompt": true
         ] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        let isGranted = AXIsProcessTrustedWithOptions(options)
+        isAccessibilityPermissionGranted = isGranted
+        return isGranted
     }
 
     private func capture(event: NSEvent, for action: HotKeyAction) {
