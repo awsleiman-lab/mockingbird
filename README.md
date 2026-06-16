@@ -31,19 +31,25 @@ Mockingbird.app
 
 ## Ship To Another Mac
 
-Build the app, then share `Mockingbird.app`:
+Build a DMG, then share `dist/Mockingbird.dmg`:
 
 ```bash
-scripts/package_app.sh
+scripts/export_dmg.sh
 ```
 
-The recipient can drag `Mockingbird.app` to `/Applications` and launch it. On first launch, Mockingbird checks its private runtime in:
+The recipient can open the DMG, drag `Mockingbird.app` to Applications, and launch it. On first launch, Mockingbird checks its private runtime in:
 
 ```bash
 ~/Library/Application Support/Mockingbird
 ```
 
 If the speech engine is missing or broken, the app shows a setup panel and installs Python, Kokoro, and model assets there. First setup needs internet access. After setup, text-to-speech is local.
+
+You can also create a zip archive with:
+
+```bash
+scripts/export_app.sh
+```
 
 ## Local Runtime
 

@@ -8,8 +8,8 @@ ZIP="$DIST/Mockingbird.zip"
 
 "$ROOT/scripts/package_app.sh" >/dev/null
 
-rm -rf "$DIST"
 mkdir -p "$DIST"
+rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 rm -rf "$APP"
 
