@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import tempfile
@@ -10,7 +11,6 @@ import warnings
 
 import numpy as np
 import soundfile as sf
-from kokoro import KPipeline
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -18,6 +18,36 @@ warnings.filterwarnings("ignore", category=UserWarning)
 DEFAULT_VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
 DEFAULT_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 SAMPLE_RATE = 24000
+
+
+def configure_bundled_assets() -> None:
+    if os.environ.get("MOCKINGBIRD_ALLOW_NETWORK_ASSETS") == "1":
+        return
+
+    if "HF_HOME" not in os.environ:
+        hf_home = os.environ.get("MOCKINGBIRD_HF_HOME")
+        if not hf_home and getattr(sys, "frozen", False):
+            executable = Path(sys.executable).resolve()
+            for parent in executable.parents:
+                for bundled_home in (parent / "huggingface", parent / "Resources" / "huggingface"):
+                    if bundled_home.exists():
+                        hf_home = str(bundled_home)
+                        break
+                if hf_home:
+                    break
+
+        if hf_home:
+            os.environ["HF_HOME"] = hf_home
+
+    if "HF_HOME" in os.environ:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+
+configure_bundled_assets()
+
+
+from kokoro import KPipeline
 
 
 def markdown_to_speech(text: str) -> str:
@@ -94,13 +124,26 @@ def run_worker() -> int:
     return 0
 
 
+def check_runtime() -> int:
+    print(json.dumps({
+        "ok": True,
+        "python": sys.version.split()[0],
+        "sample_rate": SAMPLE_RATE,
+    }), flush=True)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--voice", default=DEFAULT_VOICE)
     parser.add_argument("--speed", type=float, default=DEFAULT_SPEED)
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--check", action="store_true")
     parser.add_argument("text", nargs="*")
     args = parser.parse_args()
+
+    if args.check:
+        return check_runtime()
 
     if args.worker:
         return run_worker()

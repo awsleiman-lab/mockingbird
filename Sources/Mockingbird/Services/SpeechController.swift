@@ -48,6 +48,11 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private var activeRequestID = 0
     let availableVoices = ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam", "am_michael"]
 
+    private struct SpeechEngineCommand {
+        let executableURL: URL
+        let arguments: [String]
+    }
+
     override init() {
         let defaults = UserDefaults.standard
         selectedVoice = defaults.string(forKey: Self.voiceDefaultsKey) ?? Self.defaultVoice
@@ -570,15 +575,54 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
     }
 
+    private var bundledSpeechEngineIsAvailable: Bool {
+        FileManager.default.isExecutableFile(atPath: MockingbirdPaths.bundledSynthesizer.path)
+    }
+
+    private func speechEngineCommand(arguments: [String]) -> SpeechEngineCommand {
+        if bundledSpeechEngineIsAvailable {
+            return SpeechEngineCommand(
+                executableURL: MockingbirdPaths.bundledSynthesizer,
+                arguments: arguments
+            )
+        }
+
+        return SpeechEngineCommand(
+            executableURL: MockingbirdPaths.python,
+            arguments: [MockingbirdPaths.synthesizer.path] + arguments
+        )
+    }
+
     private func speechEngineIsReady() async throws -> Bool {
+        if bundledSpeechEngineIsAvailable {
+            let command = speechEngineCommand(arguments: ["--check"])
+            let isReady = try await processExitsSuccessfully(command)
+            if !isReady {
+                throw NSError(
+                    domain: "Mockingbird",
+                    code: 4,
+                    userInfo: [NSLocalizedDescriptionKey: "Bundled speech engine failed validation."]
+                )
+            }
+            return true
+        }
+
         guard FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path) else {
             return false
         }
 
+        let command = SpeechEngineCommand(
+            executableURL: MockingbirdPaths.python,
+            arguments: ["-c", "import kokoro, soundfile, numpy"]
+        )
+        return try await processExitsSuccessfully(command)
+    }
+
+    private func processExitsSuccessfully(_ command: SpeechEngineCommand) async throws -> Bool {
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
             let process = Process()
-            process.executableURL = MockingbirdPaths.python
-            process.arguments = ["-c", "import kokoro, soundfile, numpy"]
+            process.executableURL = command.executableURL
+            process.arguments = command.arguments
             process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
             process.standardOutput = Pipe()
             process.standardError = Pipe()
@@ -1009,8 +1053,9 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         let output = Pipe()
         let error = Pipe()
         let process = Process()
-        process.executableURL = MockingbirdPaths.python
-        process.arguments = [MockingbirdPaths.synthesizer.path, "--worker"]
+        let command = speechEngineCommand(arguments: ["--worker"])
+        process.executableURL = command.executableURL
+        process.arguments = command.arguments
         process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
         process.standardInput = input
         process.standardOutput = output
