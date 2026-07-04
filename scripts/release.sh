@@ -8,6 +8,9 @@ set -euo pipefail
 #      to appcast.xml (tracked here as source of truth).
 #   4. Pushes appcast.xml to the PUBLIC awsleiman171/mockingbird-releases repo and creates
 #      the GitHub release v<version> there with the DMG attached.
+#   5. Updates .website/app.md in that repo (version + download frontmatter) so
+#      www.awsleiman.com — which rebuilds from that repo's content — never shows a
+#      stale version.
 #
 # The source repo is private; releases live in the public repo — a feed or download URL
 # pointing at a private repo 404s for everyone but the owner, which is how updates silently
@@ -103,7 +106,41 @@ gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
   -f content="$(base64 -i "$APPCAST")" \
   ${EXISTING_SHA:+-f sha="$EXISTING_SHA"} >/dev/null
 
+echo "==> Updating website page (.website/app.md)"
+WEBSITE_MD=".website/app.md"
+PAGE_JSON="$RELEASES/app.md.json"
+PAGE_NEW="$RELEASES/app.md.new"
+rm -f "$PAGE_JSON" "$PAGE_NEW"
+gh api "repos/$RELEASES_REPO/contents/$WEBSITE_MD" > "$PAGE_JSON" \
+  || { echo "$WEBSITE_MD not found in $RELEASES_REPO — the website would go stale. Restore it (or fix WEBSITE_MD) and re-run." >&2; exit 1; }
+export PAGE_JSON PAGE_NEW
+python3 - <<'EOF'
+import base64, json, os, re, sys
+
+page = json.load(open(os.environ["PAGE_JSON"]))
+src = base64.b64decode(page["content"]).decode()
+
+new, n_ver = re.subn(r"^version:.*$", f"version: {os.environ['VERSION']}", src, count=1, flags=re.M)
+new, n_dl = re.subn(r"^download:.*$", f"download: {os.environ['DOWNLOAD_URL']}", new, count=1, flags=re.M)
+if not (n_ver and n_dl):
+    sys.exit(f"could not find 'version:'/'download:' frontmatter in {os.environ['PAGE_JSON']}")
+
+if new == src:
+    print("website page already current")
+else:
+    open(os.environ["PAGE_NEW"], "w").write(new)
+EOF
+if [[ -f "$PAGE_NEW" ]]; then
+  gh api -X PUT "repos/$RELEASES_REPO/contents/$WEBSITE_MD" \
+    -f message="Website: Mockingbird $VERSION" \
+    -f content="$(base64 -i "$PAGE_NEW")" \
+    -f sha="$(python3 -c 'import json,os;print(json.load(open(os.environ["PAGE_JSON"]))["sha"])')" >/dev/null
+  echo "website page updated"
+fi
+rm -f "$PAGE_JSON" "$PAGE_NEW"
+
 echo ""
 echo "Published:"
 echo "  DMG:  $DOWNLOAD_URL"
 echo "  feed: https://raw.githubusercontent.com/$RELEASES_REPO/main/appcast.xml"
+echo "  site: $WEBSITE_MD @ $RELEASES_REPO (version $VERSION)"
