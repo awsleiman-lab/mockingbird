@@ -11,8 +11,9 @@ set -euo pipefail
 #   5. Updates .website/app.md in that repo (version + download frontmatter) so
 #      www.awsleiman.com — which rebuilds from that repo's content — never shows a
 #      stale version.
-#   6. Commits the release changes here (Info.plist, appcast), tags v<version>, and
-#      pushes branch + tag to origin so every release is trackable in this repo's history.
+#   6. Commits the release changes here (Info.plist, appcast), tags v<version>, pushes
+#      branch + tag to origin, and creates a GitHub release on this repo from the tag
+#      (notes + DMG link, no binary) so releases are trackable next to the code.
 #
 # The source repo is private; releases live in the public repo — a feed or download URL
 # pointing at a private repo 404s for everyone but the owner, which is how updates silently
@@ -153,6 +154,19 @@ git -C "$ROOT" tag -f -a "v$VERSION" -m "Mockingbird $VERSION (build $NEW_BUILD)
 $NOTES"
 git -C "$ROOT" push origin HEAD
 git -C "$ROOT" push -f origin "refs/tags/v$VERSION"
+
+# Mirror the release on the source repo (no binary — the DMG lives on the public
+# releases repo) so the tag shows up under Releases with its notes.
+SOURCE_REPO="${MOCKINGBIRD_SOURCE_REPO:-awsleiman171/mockingbird}"
+SOURCE_NOTES="$NOTES
+
+Download: $DOWNLOAD_URL"
+if gh release view "v$VERSION" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
+  gh release edit "v$VERSION" --repo "$SOURCE_REPO" --notes "$SOURCE_NOTES" >/dev/null
+else
+  gh release create "v$VERSION" --repo "$SOURCE_REPO" --verify-tag \
+    --title "Mockingbird $VERSION" --notes "$SOURCE_NOTES" >/dev/null
+fi
 
 echo ""
 echo "Published:"
