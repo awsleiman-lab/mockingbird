@@ -47,8 +47,30 @@ enum MockingbirdPaths {
             .appending(path: "MockingbirdSynth")
     }
 
+    static var enginesRoot: URL {
+        runtimeRoot.appending(path: "engines")
+    }
+
+    static var modelsRoot: URL {
+        runtimeRoot.appending(path: "models")
+    }
+
+    static func engineDirectory(for id: SpeechEngineID) -> URL {
+        enginesRoot.appending(path: id.rawValue)
+    }
+
+    static func modelDirectory(for id: SpeechEngineID) -> URL {
+        modelsRoot.appending(path: id.rawValue)
+    }
+
+    static func engineVenvPython(for id: SpeechEngineID) -> URL {
+        engineDirectory(for: id).appending(path: "venv/bin/python")
+    }
+
     static let python = runtimeRoot.appending(path: ".venv/bin/python")
     static let synthesizer = resourcesRoot.appending(path: "python/synthesize.py")
+    static let piperSynthesizer = resourcesRoot.appending(path: "python/synthesize_piper.py")
+    static let engineSetup = resourcesRoot.appending(path: "scripts/engine_setup.sh")
     static let requestDirectory = runtimeRoot.appending(path: "requests")
     static let audioCacheDirectory = runtimeRoot.appending(path: "audio-cache")
     static let setup = resourcesRoot.appending(path: "scripts/setup.sh")

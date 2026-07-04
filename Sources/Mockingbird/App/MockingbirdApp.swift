@@ -12,5 +12,9 @@ struct MockingbirdApp: App {
             Image(systemName: controller.menuIcon)
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(controller: controller)
+        }
     }
 }

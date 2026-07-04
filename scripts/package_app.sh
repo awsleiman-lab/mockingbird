@@ -30,7 +30,14 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 CLANG_MODULE_CACHE_PATH="$CACHE" \
 swift build --scratch-path "$ROOT/.build"
 
-if [[ "${MOCKINGBIRD_SKIP_SPEECH_HELPER:-0}" != "1" ]]; then
+# Packaging modes:
+#   default                               -> small app; users download an engine during onboarding
+#   MOCKINGBIRD_BUNDLE_SPEECH_HELPER=1    -> legacy self-contained app with the frozen helper and model baked in
+#   MOCKINGBIRD_SKIP_SPEECH_HELPER=1      -> legacy dev build that installs a Python venv on first run
+BUNDLE_HELPER="${MOCKINGBIRD_BUNDLE_SPEECH_HELPER:-0}"
+LEGACY_VENV="${MOCKINGBIRD_SKIP_SPEECH_HELPER:-0}"
+
+if [[ "$BUNDLE_HELPER" == "1" ]]; then
   if [[ "${MOCKINGBIRD_REUSE_SPEECH_HELPER:-0}" != "1" || ! -x "$HELPER_BIN" ]]; then
     "$ROOT/scripts/build_speech_helper.sh" >/dev/null
   fi
@@ -44,22 +51,41 @@ fi
 rm -rf "$APP/Contents/Helpers"
 rm -rf "$APP_HELPER_ROOT"
 rm -rf "$APP/Contents/Resources/huggingface"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/python" "$APP/Contents/Resources/scripts" "$APP_HELPER_ROOT"
+rm -rf "$APP/Contents/Resources/scripts"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/python" "$APP/Contents/Resources/scripts"
 cp "$ROOT/AppBundle/Contents/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/AppBundle/Contents/Resources/Mockingbird.icns" "$APP/Contents/Resources/Mockingbird.icns"
 cp "$ROOT/python/synthesize.py" "$APP/Contents/Resources/python/synthesize.py"
-cp "$ROOT/scripts/setup.sh" "$APP/Contents/Resources/scripts/setup.sh"
+cp "$ROOT/python/synthesize_piper.py" "$APP/Contents/Resources/python/synthesize_piper.py"
+cp "$ROOT"/python/requirements-*.txt "$APP/Contents/Resources/python/"
+cp "$ROOT/scripts/engine_setup.sh" "$APP/Contents/Resources/scripts/engine_setup.sh"
+chmod +x "$APP/Contents/Resources/scripts/engine_setup.sh"
 cp "$ROOT/.build/debug/Mockingbird" "$APP/Contents/MacOS/Mockingbird"
-if [[ -d "$HELPER_DIR" && "${MOCKINGBIRD_SKIP_SPEECH_HELPER:-0}" != "1" ]]; then
+if [[ "$LEGACY_VENV" == "1" ]]; then
+  cp "$ROOT/scripts/setup.sh" "$APP/Contents/Resources/scripts/setup.sh"
+  chmod +x "$APP/Contents/Resources/scripts/setup.sh"
+fi
+if [[ "$BUNDLE_HELPER" == "1" && -d "$HELPER_DIR" ]]; then
+  mkdir -p "$APP_HELPER_ROOT"
   ditto "$HELPER_DIR" "$APP_HELPER_ROOT/MockingbirdSynth"
 fi
-if [[ -d "$SPEECH_ASSETS" && "${MOCKINGBIRD_SKIP_SPEECH_HELPER:-0}" != "1" ]]; then
+if [[ "$BUNDLE_HELPER" == "1" && -d "$SPEECH_ASSETS" ]]; then
   ditto "$SPEECH_ASSETS" "$APP/Contents/Resources/huggingface"
 fi
 chmod +x "$APP/Contents/MacOS/Mockingbird"
-chmod +x "$APP/Contents/Resources/scripts/setup.sh"
 
-SIGN_IDENTITY="${MOCKINGBIRD_CODESIGN_IDENTITY:-"-"}"
+# Prefer a stable signing identity so macOS keeps Accessibility grants across rebuilds.
+# Ad-hoc signatures change every build, which makes TCC treat each build as a new app.
+SIGN_IDENTITY="${MOCKINGBIRD_CODESIGN_IDENTITY:-}"
+if [[ -z "$SIGN_IDENTITY" ]]; then
+  for pattern in "Developer ID Application" "Apple Development"; do
+    SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' -v p="$pattern" 'index($2, p) == 1 {print $2; exit}')"
+    if [[ -n "$SIGN_IDENTITY" ]]; then
+      break
+    fi
+  done
+fi
+SIGN_IDENTITY="${SIGN_IDENTITY:-"-"}"
 CODESIGN_OPTIONS=(--force --sign "$SIGN_IDENTITY")
 if [[ "$SIGN_IDENTITY" != "-" ]]; then
   CODESIGN_OPTIONS+=(--options runtime)

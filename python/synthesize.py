@@ -49,6 +49,34 @@ configure_bundled_assets()
 
 from kokoro import KPipeline
 
+MODEL_DIR = os.environ.get("MOCKINGBIRD_MODEL_DIR")
+
+
+def build_pipeline() -> KPipeline:
+    if MODEL_DIR:
+        model_dir = Path(MODEL_DIR)
+        config = model_dir / "config.json"
+        weights = model_dir / "kokoro-v1_0.pth"
+        if config.exists() and weights.exists():
+            from kokoro import KModel
+
+            model = KModel(
+                repo_id="hexgrad/Kokoro-82M",
+                config=str(config),
+                model=str(weights),
+            )
+            return KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M", model=model)
+
+    return KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+
+
+def resolve_voice(voice: str) -> str:
+    if MODEL_DIR:
+        candidate = Path(MODEL_DIR) / "voices" / f"{voice}.pt"
+        if candidate.exists():
+            return str(candidate)
+    return voice
+
 
 def markdown_to_speech(text: str) -> str:
     text = re.sub(r"```[\w+-]*\n([\s\S]*?)```", r"\1", text)
@@ -79,10 +107,10 @@ def synthesize(text: str, voice: str, speed: float, pipeline: KPipeline | None =
         raise ValueError("No readable text was provided.")
 
     if pipeline is None:
-        pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+        pipeline = build_pipeline()
 
     chunks = []
-    for _, _, audio in pipeline(cleaned, voice=voice, speed=speed):
+    for _, _, audio in pipeline(cleaned, voice=resolve_voice(voice), speed=speed):
         chunks.append(np.asarray(audio, dtype=np.float32))
 
     if not chunks:
@@ -102,7 +130,7 @@ def synthesize(text: str, voice: str, speed: float, pipeline: KPipeline | None =
 
 
 def run_worker() -> int:
-    pipeline = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M")
+    pipeline = build_pipeline()
 
     for line in sys.stdin:
         line = line.strip()

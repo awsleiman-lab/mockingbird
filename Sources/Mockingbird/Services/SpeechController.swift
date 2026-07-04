@@ -19,6 +19,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var selectedVoice: String
     @Published var speechSpeed: Double
     @Published var usesClipboardFallback: Bool
+    @Published var cacheLimit: Int
+    @Published var showsFloatingHUD: Bool
     @Published var audioCache: [AudioCacheEntry] = []
     @Published var setupProgressText: String = ""
     @Published var setupFailureDetails: String = ""
@@ -46,7 +48,30 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private var hasRequestedAccessibilityPrompt = false
     private var isFloatingPlaybackHUDDismissed = false
     private var activeRequestID = 0
-    let availableVoices = ["af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "am_adam", "am_michael"]
+
+    @Published var selectedEngine: SpeechEngineID
+    @Published var needsOnboarding: Bool = false
+    let engineInstaller = EngineInstaller()
+    private var onboardingWindow: OnboardingWindowController?
+    private var cachedSystemVoices: [EngineVoice]?
+
+    var availableEngineVoices: [EngineVoice] {
+        if selectedEngine == .system {
+            if cachedSystemVoices == nil {
+                cachedSystemVoices = SystemSpeechSynthesizer.availableVoices()
+            }
+            return cachedSystemVoices ?? []
+        }
+        return SpeechEngineCatalog.info(for: selectedEngine).voices
+    }
+
+    var availableVoices: [String] {
+        availableEngineVoices.map(\.id)
+    }
+
+    var selectedEngineName: String {
+        SpeechEngineCatalog.info(for: selectedEngine).name
+    }
 
     private struct SpeechEngineCommand {
         let executableURL: URL
@@ -55,13 +80,17 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     override init() {
         let defaults = UserDefaults.standard
+        let storedEngine = defaults.string(forKey: Self.engineDefaultsKey).flatMap(SpeechEngineID.init(rawValue:))
+        selectedEngine = storedEngine ?? .kokoro
         selectedVoice = defaults.string(forKey: Self.voiceDefaultsKey) ?? Self.defaultVoice
         speechSpeed = Self.clampedSpeed(defaults.object(forKey: Self.speedDefaultsKey) as? Double ?? 1.0)
         usesClipboardFallback = defaults.object(forKey: Self.clipboardFallbackDefaultsKey) as? Bool ?? true
+        cacheLimit = defaults.object(forKey: Self.cacheLimitDefaultsKey) as? Int ?? Self.maxCachedAudioFiles
+        showsFloatingHUD = defaults.object(forKey: Self.showsHUDDefaultsKey) as? Bool ?? true
         super.init()
         floatingPlaybackHUD = FloatingPlaybackPanelController(controller: self)
         if !availableVoices.contains(selectedVoice) {
-            selectedVoice = Self.defaultVoice
+            selectedVoice = defaultVoice(for: selectedEngine)
             defaults.set(selectedVoice, forKey: Self.voiceDefaultsKey)
         }
         hotKeys = loadHotKeys()
@@ -78,7 +107,26 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         refreshAccessibilityPermission()
         observeAppActivation()
         startRequestWatcher()
+        needsOnboarding = !defaults.bool(forKey: Self.onboardingCompletedKey) && !selectedEngineLooksUsable
         bootstrapAndStart()
+        if needsOnboarding {
+            DispatchQueue.main.async { [weak self] in
+                self?.showOnboarding()
+            }
+        }
+    }
+
+    private var selectedEngineLooksUsable: Bool {
+        switch selectedEngine {
+        case .system:
+            return true
+        case .piper:
+            return EngineInstaller.isInstalled(.piper)
+        case .kokoro:
+            return EngineInstaller.isInstalled(.kokoro)
+                || bundledSpeechEngineIsAvailable
+                || FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path)
+        }
     }
 
     var menuTitle: String {
@@ -108,17 +156,14 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     var engineStatusText: String {
+        if needsOnboarding {
+            return "Setup required"
+        }
         if isSettingUp {
             return "Installing speech engine"
         }
         if setupFailed {
             return "Setup needs attention"
-        }
-        if synthesisIsGenerating {
-            return "Warming voice"
-        }
-        if synthesisProcess?.isRunning == true {
-            return "Worker warm"
         }
 
         switch status {
@@ -131,8 +176,17 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         case .error:
             return "Needs attention"
         default:
+            break
+        }
+
+        if synthesisIsGenerating {
+            return "Warming voice"
+        }
+        if synthesisProcess?.isRunning == true {
             return "Ready"
         }
+
+        return "Ready"
     }
 
     var needsAccessibilityPermission: Bool {
@@ -236,13 +290,17 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func voiceDisplayName(_ voice: String) -> String {
-        voice
-            .split(separator: "_")
-            .dropFirst()
-            .map { part in
-                String(part.prefix(1)).uppercased() + String(part.dropFirst())
-            }
-            .joined(separator: " ")
+        if let match = availableEngineVoices.first(where: { $0.id == voice }) {
+            return match.displayName
+        }
+        return SpeechEngineCatalog.kokoroVoiceDisplayName(voice)
+    }
+
+    private func defaultVoice(for engine: SpeechEngineID) -> String {
+        if engine == .system {
+            return SystemSpeechSynthesizer.defaultVoiceIdentifier()
+        }
+        return SpeechEngineCatalog.info(for: engine).defaultVoice
     }
 
     func setVoice(_ voice: String) {
@@ -262,6 +320,48 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         usesClipboardFallback = isEnabled
         UserDefaults.standard.set(isEnabled, forKey: Self.clipboardFallbackDefaultsKey)
         detail = isEnabled ? "Clipboard fallback enabled." : "Clipboard fallback disabled."
+    }
+
+    func setCacheLimit(_ limit: Int) {
+        cacheLimit = limit
+        UserDefaults.standard.set(limit, forKey: Self.cacheLimitDefaultsKey)
+        refreshAudioCache()
+    }
+
+    func setShowsFloatingHUD(_ isEnabled: Bool) {
+        showsFloatingHUD = isEnabled
+        UserDefaults.standard.set(isEnabled, forKey: Self.showsHUDDefaultsKey)
+        syncFloatingPlaybackHUD()
+    }
+
+    func activateEngine(_ engine: SpeechEngineID) {
+        guard engine != selectedEngine else { return }
+        setEngine(engine)
+        bootstrapAndStart()
+    }
+
+    func uninstallEngine(_ engine: SpeechEngineID) {
+        guard engine != .system, engine != selectedEngine else { return }
+        try? FileManager.default.removeItem(at: MockingbirdPaths.engineDirectory(for: engine))
+        try? FileManager.default.removeItem(at: MockingbirdPaths.modelDirectory(for: engine))
+        objectWillChange.send()
+        detail = "\(SpeechEngineCatalog.info(for: engine).name) was uninstalled."
+    }
+
+    func playVoiceSample() {
+        let name = voiceDisplayName(selectedVoice)
+        synthesizeAndPlay("Hi! I'm \(name), and this is how I sound when Mockingbird reads for you.")
+    }
+
+    func clearAudioCache() {
+        if currentAudioPath?.hasPrefix(MockingbirdPaths.audioCacheDirectory.path) == true {
+            stop()
+        }
+        for entry in cachedAudioEntries() {
+            try? FileManager.default.removeItem(at: entry.url)
+        }
+        refreshAudioCache()
+        detail = "Audio cache cleared."
     }
 
     @discardableResult
@@ -384,6 +484,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         progress = clamped
     }
 
+    func skipBack(_ seconds: TimeInterval = 10) {
+        guard let audioPlayer, audioPlayer.duration > 0 else { return }
+        audioPlayer.currentTime = max(audioPlayer.currentTime - seconds, 0)
+        currentTime = audioPlayer.currentTime
+        progress = min(currentTime / audioPlayer.duration, 1)
+    }
+
     func dismissFloatingPlaybackHUD() {
         isFloatingPlaybackHUDDismissed = true
         floatingPlaybackHUD?.hide()
@@ -440,13 +547,19 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func resetSettings() {
-        selectedVoice = Self.defaultVoice
+        selectedVoice = defaultVoice(for: selectedEngine)
         speechSpeed = 1.0
         usesClipboardFallback = true
+        cacheLimit = Self.maxCachedAudioFiles
+        showsFloatingHUD = true
         UserDefaults.standard.set(selectedVoice, forKey: Self.voiceDefaultsKey)
         UserDefaults.standard.set(speechSpeed, forKey: Self.speedDefaultsKey)
         UserDefaults.standard.set(usesClipboardFallback, forKey: Self.clipboardFallbackDefaultsKey)
+        UserDefaults.standard.set(cacheLimit, forKey: Self.cacheLimitDefaultsKey)
+        UserDefaults.standard.set(showsFloatingHUD, forKey: Self.showsHUDDefaultsKey)
         resetHotKeys()
+        refreshAudioCache()
+        syncFloatingPlaybackHUD()
         detail = "Settings reset."
     }
 
@@ -507,7 +620,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func syncFloatingPlaybackHUD() {
-        guard !isFloatingPlaybackHUDDismissed else {
+        guard showsFloatingHUD, !isFloatingPlaybackHUDDismissed else {
             floatingPlaybackHUD?.hide()
             return
         }
@@ -536,7 +649,50 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         bootstrapAndStart(forceSetup: true)
     }
 
+    func showOnboarding() {
+        if onboardingWindow == nil {
+            onboardingWindow = OnboardingWindowController(controller: self)
+        }
+        onboardingWindow?.show()
+    }
+
+    func setEngine(_ engine: SpeechEngineID) {
+        stop()
+        terminateSynthesisWorker()
+        selectedEngine = engine
+        cachedSystemVoices = nil
+        UserDefaults.standard.set(engine.rawValue, forKey: Self.engineDefaultsKey)
+
+        if !availableVoices.contains(selectedVoice) {
+            selectedVoice = defaultVoice(for: engine)
+            UserDefaults.standard.set(selectedVoice, forKey: Self.voiceDefaultsKey)
+        }
+    }
+
+    func completeOnboarding(with engine: SpeechEngineID) {
+        setEngine(engine)
+        UserDefaults.standard.set(true, forKey: Self.onboardingCompletedKey)
+        needsOnboarding = false
+        bootstrapAndStart()
+    }
+
     private func bootstrapAndStart(forceSetup: Bool = false) {
+        if needsOnboarding {
+            setupFailed = false
+            setupProgressText = ""
+            status = .ready
+            detail = "Finish setup to choose a voice engine."
+            return
+        }
+
+        if selectedEngine == .system {
+            setupFailed = false
+            setupProgressText = ""
+            status = .ready
+            detail = "Ready for selected text."
+            return
+        }
+
         status = .starting
         setupFailed = false
         setupFailureDetails = ""
@@ -558,6 +714,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                     return
                 }
 
+                guard legacySetupIsAvailable, selectedEngine == .kokoro,
+                      !installedSpeechEngineIsAvailable, !bundledSpeechEngineIsAvailable else {
+                    setupProgressText = ""
+                    status = .ready
+                    detail = "Download a voice engine to start reading."
+                    needsOnboarding = true
+                    showOnboarding()
+                    return
+                }
+
                 setupProgressText = "Preparing local installation..."
                 detail = "Installing the speech engine locally. This can take a few minutes the first time."
                 try await runSetup()
@@ -575,11 +741,31 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
     }
 
+    private var legacySetupIsAvailable: Bool {
+        FileManager.default.fileExists(atPath: MockingbirdPaths.setup.path)
+    }
+
     private var bundledSpeechEngineIsAvailable: Bool {
-        FileManager.default.isExecutableFile(atPath: MockingbirdPaths.bundledSynthesizer.path)
+        selectedEngine == .kokoro
+            && FileManager.default.isExecutableFile(atPath: MockingbirdPaths.bundledSynthesizer.path)
+    }
+
+    private var installedSpeechEngineIsAvailable: Bool {
+        selectedEngine != .system && EngineInstaller.isInstalled(selectedEngine)
     }
 
     private func speechEngineCommand(arguments: [String]) -> SpeechEngineCommand {
+        let venvPython = MockingbirdPaths.engineVenvPython(for: selectedEngine)
+        if selectedEngine != .system, FileManager.default.isExecutableFile(atPath: venvPython.path) {
+            let script = selectedEngine == .piper
+                ? MockingbirdPaths.piperSynthesizer
+                : MockingbirdPaths.synthesizer
+            return SpeechEngineCommand(
+                executableURL: venvPython,
+                arguments: [script.path] + arguments
+            )
+        }
+
         if bundledSpeechEngineIsAvailable {
             return SpeechEngineCommand(
                 executableURL: MockingbirdPaths.bundledSynthesizer,
@@ -593,21 +779,31 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         )
     }
 
+    private func speechEngineEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let modelDirectory = MockingbirdPaths.modelDirectory(for: selectedEngine)
+        if FileManager.default.fileExists(atPath: modelDirectory.path) {
+            environment["MOCKINGBIRD_MODEL_DIR"] = modelDirectory.path
+        }
+        return environment
+    }
+
     private func speechEngineIsReady() async throws -> Bool {
-        if bundledSpeechEngineIsAvailable {
+        if installedSpeechEngineIsAvailable || bundledSpeechEngineIsAvailable {
             let command = speechEngineCommand(arguments: ["--check"])
             let isReady = try await processExitsSuccessfully(command)
             if !isReady {
                 throw NSError(
                     domain: "Mockingbird",
                     code: 4,
-                    userInfo: [NSLocalizedDescriptionKey: "Bundled speech engine failed validation."]
+                    userInfo: [NSLocalizedDescriptionKey: "The speech engine failed validation. Try downloading it again."]
                 )
             }
             return true
         }
 
-        guard FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path) else {
+        guard selectedEngine == .kokoro,
+              FileManager.default.isExecutableFile(atPath: MockingbirdPaths.python.path) else {
             return false
         }
 
@@ -624,6 +820,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             process.executableURL = command.executableURL
             process.arguments = command.arguments
             process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
+            process.environment = speechEngineEnvironment()
             process.standardOutput = Pipe()
             process.standardError = Pipe()
             process.terminationHandler = { process in
@@ -726,9 +923,10 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
     private func refreshAudioCache() {
         prepareAudioCacheDirectory()
+        let limit = cacheLimit <= 0 ? Int.max : cacheLimit
         let entries = cachedAudioEntries()
-        let retained = Array(entries.prefix(Self.maxCachedAudioFiles))
-        for entry in entries.dropFirst(Self.maxCachedAudioFiles) {
+        let retained = Array(entries.prefix(limit))
+        for entry in entries.dropFirst(limit) {
             try? FileManager.default.removeItem(at: entry.url)
         }
         audioCache = retained
@@ -744,7 +942,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
 
         return urls
-            .filter { $0.pathExtension.lowercased() == "mp3" }
+            .filter { Self.cachedAudioExtensions.contains($0.pathExtension.lowercased()) }
             .compactMap { url in
                 let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey])
                 let date = values?.contentModificationDate ?? values?.creationDate ?? .distantPast
@@ -955,6 +1153,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func synthesizeAndPlay(_ text: String) {
+        guard !needsOnboarding else {
+            status = .error("Setup is not finished.")
+            detail = "Open Mockingbird setup and choose a voice engine."
+            showOnboarding()
+            return
+        }
+
         activeRequestID += 1
         let requestID = activeRequestID
         isFloatingPlaybackHUDDismissed = false
@@ -993,6 +1198,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private func synthesize(text: String, requestID: Int) async throws -> SynthesisResult {
         progress = 0
         progressText = "Generating speech..."
+
+        if selectedEngine == .system {
+            let result = try await SystemSpeechSynthesizer.synthesize(
+                text: text,
+                voiceIdentifier: selectedVoice,
+                speed: speechSpeed
+            )
+            return SynthesisResult(path: result.path, duration: result.duration)
+        }
+
         let worker = try startSynthesisWorkerIfNeeded()
         synthesisIsGenerating = true
         synthesisIdleTimer?.invalidate()
@@ -1057,6 +1272,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         process.executableURL = command.executableURL
         process.arguments = command.arguments
         process.currentDirectoryURL = MockingbirdPaths.runtimeRoot
+        process.environment = speechEngineEnvironment()
         process.standardInput = input
         process.standardOutput = output
         process.standardError = error
@@ -1196,7 +1412,9 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private func cacheGeneratedAudio(at sourcePath: String, for text: String) throws -> String {
         prepareAudioCacheDirectory()
         let source = URL(fileURLWithPath: sourcePath)
-        let destination = availableCacheURL(for: Self.cacheFileName(for: text))
+        let sourceExtension = source.pathExtension.lowercased()
+        let fileExtension = Self.cachedAudioExtensions.contains(sourceExtension) ? sourceExtension : "mp3"
+        let destination = availableCacheURL(for: Self.cacheFileName(for: text, fileExtension: fileExtension))
 
         do {
             try FileManager.default.moveItem(at: source, to: destination)
@@ -1299,11 +1517,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
 private extension SpeechController {
     static let synthesisWarmIdleInterval: TimeInterval = 120
-    static let maxCachedAudioFiles = 10
+    static let maxCachedAudioFiles = 100
     static let defaultVoice = "af_heart"
+    static let cachedAudioExtensions: Set<String> = ["mp3", "wav", "m4a", "caf", "aiff"]
     static let voiceDefaultsKey = "settings.voice"
     static let speedDefaultsKey = "settings.speed"
     static let clipboardFallbackDefaultsKey = "settings.clipboardFallback"
+    static let engineDefaultsKey = "settings.engine"
+    static let onboardingCompletedKey = "onboarding.completed"
+    static let cacheLimitDefaultsKey = "settings.cacheLimit"
+    static let showsHUDDefaultsKey = "settings.showsHUD"
 
     static func clampedSpeed(_ speed: Double) -> Double {
         min(max(speed, 0.5), 2.0)
@@ -1323,12 +1546,12 @@ private extension SpeechController {
         return String(normalized.prefix(96)).trimmingCharacters(in: .whitespacesAndNewlines) + "..."
     }
 
-    static func cacheFileName(for text: String) -> String {
+    static func cacheFileName(for text: String, fileExtension: String) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let timestamp = formatter.string(from: Date())
-        return "\(cacheTitleSlug(for: text))-\(timestamp).mp3"
+        return "\(cacheTitleSlug(for: text))-\(timestamp).\(fileExtension)"
     }
 
     static func cacheDisplayTitle(for url: URL) -> String {
