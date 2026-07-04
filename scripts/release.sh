@@ -86,20 +86,22 @@ print("appcast updated")
 EOF
 
 echo "==> Publishing to $RELEASES_REPO"
-# Appcast push first: it creates the initial commit on a brand-new repo, and GitHub refuses
-# to create releases in a repo with no commits.
-EXISTING_SHA="$(gh api "repos/$RELEASES_REPO/contents/appcast.xml" --jq .sha 2>/dev/null || true)"
-gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
-  -f message="Appcast: Mockingbird $VERSION" \
-  -f content="$(base64 -i "$APPCAST")" \
-  ${EXISTING_SHA:+-f sha="$EXISTING_SHA"} >/dev/null
-
+# Release first, appcast second: the moment the appcast goes live its enclosure URL must
+# already resolve, otherwise apps that check during the gap show users a failed update.
+# (One-time bootstrap: GitHub refuses releases in a repo with zero commits — on a brand-new
+# repo, push any file once before running this script.)
 if gh release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
   gh release upload "v$VERSION" "$DMG_PATH" --clobber --repo "$RELEASES_REPO"
 else
   gh release create "v$VERSION" "$DMG_PATH" --repo "$RELEASES_REPO" \
     --title "Mockingbird $VERSION" --notes "$NOTES"
 fi
+
+EXISTING_SHA="$(gh api "repos/$RELEASES_REPO/contents/appcast.xml" --jq .sha 2>/dev/null || true)"
+gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
+  -f message="Appcast: Mockingbird $VERSION" \
+  -f content="$(base64 -i "$APPCAST")" \
+  ${EXISTING_SHA:+-f sha="$EXISTING_SHA"} >/dev/null
 
 echo ""
 echo "Published:"
