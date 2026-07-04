@@ -61,6 +61,10 @@ cp "$ROOT"/python/requirements-*.txt "$APP/Contents/Resources/python/"
 cp "$ROOT/scripts/engine_setup.sh" "$APP/Contents/Resources/scripts/engine_setup.sh"
 chmod +x "$APP/Contents/Resources/scripts/engine_setup.sh"
 cp "$ROOT/.build/release/Mockingbird" "$APP/Contents/MacOS/Mockingbird"
+rm -rf "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$ROOT/.build/release/Sparkle.framework" "$APP/Contents/Frameworks/Sparkle.framework"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/Mockingbird" 2>/dev/null || true
 if [[ "$LEGACY_VENV" == "1" ]]; then
   cp "$ROOT/scripts/setup.sh" "$APP/Contents/Resources/scripts/setup.sh"
   chmod +x "$APP/Contents/Resources/scripts/setup.sh"
@@ -93,5 +97,16 @@ fi
 if [[ -d "$APP_HELPER_ROOT/MockingbirdSynth" ]]; then
   sign_macho_files "$APP_HELPER_ROOT/MockingbirdSynth"
 fi
+
+# Sparkle's nested components must be signed innermost-first.
+SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$SPARKLE_FW" ]]; then
+  codesign "${CODESIGN_OPTIONS[@]}" "$SPARKLE_FW/Versions/B/Autoupdate"
+  codesign "${CODESIGN_OPTIONS[@]}" "$SPARKLE_FW/Versions/B/Updater.app"
+  codesign "${CODESIGN_OPTIONS[@]}" --preserve-metadata=entitlements "$SPARKLE_FW/Versions/B/XPCServices/Installer.xpc"
+  codesign "${CODESIGN_OPTIONS[@]}" --preserve-metadata=entitlements "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc"
+  codesign "${CODESIGN_OPTIONS[@]}" "$SPARKLE_FW"
+fi
+
 codesign "${CODESIGN_OPTIONS[@]}" "$APP"
 echo "$APP"

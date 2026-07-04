@@ -1,3 +1,4 @@
+import Sparkle
 import SwiftUI
 
 private enum CacheDownloadFeedback: Equatable {
@@ -7,6 +8,7 @@ private enum CacheDownloadFeedback: Equatable {
 
 struct MockingbirdMenuView: View {
     @ObservedObject var controller: SpeechController
+    var updaterController: SPUStandardUpdaterController?
     @Environment(\.openSettings) private var openSettings
     @State private var showsAllRecent = false
     @State private var isSetupDetailsExpanded = false
@@ -101,6 +103,13 @@ struct MockingbirdMenuView: View {
             Button("Settings...") {
                 openSettings()
                 NSApp.activate(ignoringOtherApps: true)
+            }
+
+            if let updaterController {
+                Button("Check for Updates...") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    updaterController.checkForUpdates(nil)
+                }
             }
 
             Divider()
