@@ -28,7 +28,7 @@ swift "$ROOT/scripts/generate_icon.swift"
 
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 CLANG_MODULE_CACHE_PATH="$CACHE" \
-swift build --scratch-path "$ROOT/.build"
+swift build -c release --scratch-path "$ROOT/.build"
 
 # Packaging modes:
 #   default                               -> small app; users download an engine during onboarding
@@ -60,7 +60,7 @@ cp "$ROOT/python/synthesize_piper.py" "$APP/Contents/Resources/python/synthesize
 cp "$ROOT"/python/requirements-*.txt "$APP/Contents/Resources/python/"
 cp "$ROOT/scripts/engine_setup.sh" "$APP/Contents/Resources/scripts/engine_setup.sh"
 chmod +x "$APP/Contents/Resources/scripts/engine_setup.sh"
-cp "$ROOT/.build/debug/Mockingbird" "$APP/Contents/MacOS/Mockingbird"
+cp "$ROOT/.build/release/Mockingbird" "$APP/Contents/MacOS/Mockingbird"
 if [[ "$LEGACY_VENV" == "1" ]]; then
   cp "$ROOT/scripts/setup.sh" "$APP/Contents/Resources/scripts/setup.sh"
   chmod +x "$APP/Contents/Resources/scripts/setup.sh"
@@ -88,7 +88,7 @@ fi
 SIGN_IDENTITY="${SIGN_IDENTITY:-"-"}"
 CODESIGN_OPTIONS=(--force --sign "$SIGN_IDENTITY")
 if [[ "$SIGN_IDENTITY" != "-" ]]; then
-  CODESIGN_OPTIONS+=(--options runtime)
+  CODESIGN_OPTIONS+=(--options runtime --timestamp)
 fi
 if [[ -d "$APP_HELPER_ROOT/MockingbirdSynth" ]]; then
   sign_macho_files "$APP_HELPER_ROOT/MockingbirdSynth"
