@@ -11,6 +11,8 @@ set -euo pipefail
 #   5. Updates .website/app.md in that repo (version + download frontmatter) so
 #      www.awsleiman.com — which rebuilds from that repo's content — never shows a
 #      stale version.
+#   6. Commits the release changes here (Info.plist, appcast), tags v<version>, and
+#      pushes branch + tag to origin so every release is trackable in this repo's history.
 #
 # The source repo is private; releases live in the public repo — a feed or download URL
 # pointing at a private repo 404s for everyone but the owner, which is how updates silently
@@ -139,8 +141,22 @@ if [[ -f "$PAGE_NEW" ]]; then
 fi
 rm -f "$PAGE_JSON" "$PAGE_NEW"
 
+echo "==> Tagging source repo v$VERSION"
+git -C "$ROOT" add appcast.xml AppBundle/Contents/Info.plist
+git -C "$ROOT" diff --cached --quiet || git -C "$ROOT" commit -m "Release $VERSION (build $NEW_BUILD)"
+if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
+  echo "    note: working tree has other uncommitted changes — the tag will not include them"
+fi
+# Forced on purpose: re-releasing a version (fixed DMG) moves its tag to the new state.
+git -C "$ROOT" tag -f -a "v$VERSION" -m "Mockingbird $VERSION (build $NEW_BUILD)
+
+$NOTES"
+git -C "$ROOT" push origin HEAD
+git -C "$ROOT" push -f origin "refs/tags/v$VERSION"
+
 echo ""
 echo "Published:"
 echo "  DMG:  $DOWNLOAD_URL"
 echo "  feed: https://raw.githubusercontent.com/$RELEASES_REPO/main/appcast.xml"
 echo "  site: $WEBSITE_MD @ $RELEASES_REPO (version $VERSION)"
+echo "  tag:  v$VERSION @ $(git -C "$ROOT" remote get-url origin)"
