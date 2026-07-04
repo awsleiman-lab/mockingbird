@@ -501,6 +501,25 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         readSelectionOrClipboard()
     }
 
+    func requestAccessibilityPermission() {
+        refreshAccessibilityPermission()
+        guard !isAccessibilityPermissionGranted else { return }
+
+        if hasRequestedAccessibilityPrompt {
+            // The system prompt only shows once; afterwards send the user
+            // straight to the Accessibility pane.
+            openAccessibilitySettings()
+            return
+        }
+
+        hasRequestedAccessibilityPrompt = true
+        let options = [
+            "AXTrustedCheckOptionPrompt": true
+        ] as CFDictionary
+        isAccessibilityPermissionGranted = AXIsProcessTrustedWithOptions(options)
+        scheduleAccessibilityPermissionChecks()
+    }
+
     func refreshAccessibilityPermission() {
         let isGranted = AXIsProcessTrusted()
         isAccessibilityPermissionGranted = isGranted

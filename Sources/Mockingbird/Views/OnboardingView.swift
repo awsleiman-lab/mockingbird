@@ -54,6 +54,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
 private enum OnboardingStep: Int, CaseIterable {
     case welcome
     case howItWorks
+    case permissions
     case chooseEngine
     case download
     case finish
@@ -97,6 +98,8 @@ struct OnboardingView: View {
             welcomeStep
         case .howItWorks:
             howItWorksStep
+        case .permissions:
+            permissionsStep
         case .chooseEngine:
             chooseEngineStep
         case .download:
@@ -180,17 +183,80 @@ struct OnboardingView: View {
                 text: "Click the waveform icon to change voices, speed, shortcuts, and to replay recently generated audio."
             )
 
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "accessibility")
-                    .foregroundStyle(Color.accentColor)
+        }
+    }
 
-                Text("macOS will ask for Accessibility permission the first time you use the read shortcut — Mockingbird needs it to capture the selected text.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+    private var permissionsStep: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            stepHeader(
+                title: "Allow Mockingbird to see your selection",
+                subtitle: "Reading selected text needs macOS Accessibility access — it's how Mockingbird copies the text you've highlighted when you press the shortcut."
+            )
+
+            VStack(alignment: .leading, spacing: 14) {
+                if controller.isAccessibilityPermissionGranted {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.green)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Access granted")
+                                .font(.body.weight(.semibold))
+                            Text("Mockingbird can read your selected text.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 10) {
+                        Image(systemName: "accessibility")
+                            .font(.title2)
+                            .foregroundStyle(Color.accentColor)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Accessibility access needed")
+                                .font(.body.weight(.semibold))
+                            Text("macOS will ask you to allow Mockingbird in Privacy & Security > Accessibility.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Button {
+                        controller.requestAccessibilityPermission()
+                    } label: {
+                        Label("Request Access", systemImage: "lock.open")
+                            .font(.callout.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                    }
+                    .controlSize(.large)
+                }
             }
-            .padding(12)
+            .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+
+            VStack(alignment: .leading, spacing: 10) {
+                welcomePoint(
+                    icon: "lock.shield",
+                    title: "Used for one thing only",
+                    text: "The permission is used solely to copy your selection when you press the read shortcut. Nothing is monitored in the background."
+                )
+                welcomePoint(
+                    icon: "doc.on.clipboard",
+                    title: "You can skip this",
+                    text: "Without it, Mockingbird can still read text you copy — grant access any time later from the menu."
+                )
+            }
+        }
+        .task(id: controller.isAccessibilityPermissionGranted) {
+            while !Task.isCancelled, !controller.isAccessibilityPermissionGranted {
+                try? await Task.sleep(for: .seconds(1))
+                controller.refreshAccessibilityPermission()
+            }
         }
     }
 
@@ -537,6 +603,8 @@ struct OnboardingView: View {
         case .welcome:
             step = .howItWorks
         case .howItWorks:
+            step = .permissions
+        case .permissions:
             step = .chooseEngine
         case .chooseEngine:
             let engine = SpeechEngineCatalog.info(for: chosenEngine)
@@ -558,8 +626,10 @@ struct OnboardingView: View {
         switch step {
         case .howItWorks:
             step = .welcome
+        case .permissions:
+            step = .howItWorks
         case .chooseEngine:
-            step = startAtEngineChoice ? .chooseEngine : .howItWorks
+            step = startAtEngineChoice ? .chooseEngine : .permissions
         case .finish:
             step = .chooseEngine
         default:
