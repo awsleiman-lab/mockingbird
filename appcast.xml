@@ -3,6 +3,16 @@
     <channel>
         <title>Mockingbird</title>
         <item>
+            <title>1.1.0</title>
+            <pubDate>Sun, 05 Jul 2026 01:43:48 +0000</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[Streaming playback: reading now starts on the first sentence instead of waiting for the whole text. Redesigned floating player with a native translucent look, hover controls, and position memory. New optional keep-engine-warm setting for instant starts, plus faster selection capture.]]></description>
+            <enclosure url="https://github.com/awsleiman171/mockingbird-releases/releases/download/v1.1.0/Mockingbird-1.1.0.dmg" length="4134866" type="application/octet-stream" sparkle:edSignature="ETYVzSkswWN0wIvwTWFKssPFEUqWvsauAqThv0D2z+JBFTuojZa2+DBz2bSPGvDvwJ8ekTHRFRFXMha53JnwBA=="/>
+        </item>
+        <item>
             <title>1.0.2</title>
             <pubDate>Sat, 04 Jul 2026 18:12:10 +0000</pubDate>
             <sparkle:version>4</sparkle:version>
