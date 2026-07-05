@@ -1,6 +1,18 @@
 # Mockingbird
 
-Mockingbird is a small macOS menu bar app that reads selected text aloud with local TTS.
+**Select text anywhere on your Mac and hear it read aloud — natural neural
+voices, fully on-device.**
+
+Mockingbird is a small menu-bar app: select text in any app, press
+`Ctrl+Option+S`, and listen. Pause and resume with `Ctrl+Option+P`. Speech is
+generated locally by the voice engine of your choice — no accounts, no cloud,
+and after the one-time engine download it works fully offline.
+
+<img src="docs/menu-bar.png" alt="Mockingbird's menu-bar panel reading a selection" width="480">
+
+**[Download for macOS 14+ (Apple Silicon)](https://www.awsleiman.com/apps/mockingbird/)**
+— signed and notarized, auto-updates via Sparkle. Or build it yourself below.
+MIT licensed.
 
 ## What It Owns
 
