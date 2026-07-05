@@ -166,7 +166,7 @@ git -C "$ROOT" push -f origin "refs/tags/v$VERSION"
 
 # Mirror the release on the source repo (no binary — the DMG lives on the public
 # releases repo) so the tag shows up under Releases with its notes.
-SOURCE_REPO="${MOCKINGBIRD_SOURCE_REPO:-awsleiman171/mockingbird}"
+SOURCE_REPO="${MOCKINGBIRD_SOURCE_REPO:-awsleiman-lab/mockingbird}"
 SOURCE_NOTES="$NOTES
 
 Download: $DOWNLOAD_URL"
