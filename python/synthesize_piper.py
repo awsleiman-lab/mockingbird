@@ -139,6 +139,76 @@ def synthesize(text: str, voice: str, speed: float) -> dict:
     }
 
 
+def write_wav(path: str, frames: bytes, sample_rate: int, sample_width: int, channels: int) -> None:
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(frames)
+
+
+def stream_synthesize(text: str, voice: str, speed: float) -> None:
+    """Emit one JSON line per synthesized sentence chunk, then a final `done`
+    line whose path is the full concatenated audio for the cache."""
+    start = time.time()
+    cleaned = clean_text(text)
+    if not cleaned:
+        raise ValueError("No readable text was provided.")
+
+    piper_voice = load_voice(voice)
+    length_scale = 1.0 / max(speed, 0.1)
+
+    try:
+        from piper import SynthesisConfig
+
+        chunk_iter = piper_voice.synthesize(cleaned, syn_config=SynthesisConfig(length_scale=length_scale))
+    except ImportError:
+        chunk_iter = piper_voice.synthesize(cleaned, length_scale=length_scale)
+
+    pieces = []
+    index = 0
+    sample_rate = 22050
+    sample_width = 2
+    channels = 1
+    for chunk in chunk_iter:
+        frames = chunk.audio_int16_bytes
+        if not frames:
+            continue
+
+        sample_rate = chunk.sample_rate
+        sample_width = chunk.sample_width
+        channels = chunk.sample_channels
+
+        index += 1
+        with tempfile.NamedTemporaryFile(prefix="mockingbird-chunk-", suffix=".wav", delete=False) as handle:
+            chunk_path = handle.name
+        write_wav(chunk_path, frames, sample_rate, sample_width, channels)
+        frame_count = len(frames) // (sample_width * channels)
+        print(json.dumps({
+            "chunk": index,
+            "path": chunk_path,
+            "duration": round(frame_count / float(sample_rate), 3),
+        }), flush=True)
+        pieces.append(frames)
+
+    if not pieces:
+        raise RuntimeError("The speech engine did not produce audio.")
+
+    full = b"".join(pieces)
+    with tempfile.NamedTemporaryFile(prefix="mockingbird-", suffix=".wav", delete=False) as handle:
+        final_path = handle.name
+    write_wav(final_path, full, sample_rate, sample_width, channels)
+    total_frames = len(full) // (sample_width * channels)
+    print(json.dumps({
+        "done": True,
+        "ok": True,
+        "path": final_path,
+        "duration": round(total_frames / float(sample_rate), 3),
+        "characters": len(cleaned),
+        "elapsed": round(time.time() - start, 3),
+    }), flush=True)
+
+
 def run_worker() -> int:
     for line in sys.stdin:
         line = line.strip()
@@ -147,12 +217,15 @@ def run_worker() -> int:
 
         try:
             request = json.loads(line)
-            result = synthesize(
-                request.get("text", ""),
-                request.get("voice", DEFAULT_VOICE),
-                float(request.get("speed", DEFAULT_SPEED)),
-            )
-            print(json.dumps({"ok": True, **result}), flush=True)
+            text = request.get("text", "")
+            voice = request.get("voice", DEFAULT_VOICE)
+            speed = float(request.get("speed", DEFAULT_SPEED))
+
+            if request.get("stream"):
+                stream_synthesize(text, voice, speed)
+            else:
+                result = synthesize(text, voice, speed)
+                print(json.dumps({"ok": True, **result}), flush=True)
         except Exception as error:
             print(json.dumps({"ok": False, "error": str(error)}), flush=True)
 

@@ -129,6 +129,52 @@ def synthesize(text: str, voice: str, speed: float, pipeline: KPipeline | None =
     }
 
 
+def stream_synthesize(text: str, voice: str, speed: float, pipeline: KPipeline) -> None:
+    """Emit one JSON line per synthesized sentence chunk, then a final `done`
+    line whose path is the full concatenated audio for the cache."""
+    start = time.time()
+    cleaned = clean_text(text)
+    if not cleaned:
+        raise ValueError("No readable text was provided.")
+
+    chunks = []
+    index = 0
+    # Split on sentence boundaries (not just newlines) so the first chunk is
+    # one sentence and playback can start almost immediately.
+    sentence_split = r"\n+|(?<=[.!?…])\s+"
+    for _, _, audio in pipeline(cleaned, voice=resolve_voice(voice), speed=speed, split_pattern=sentence_split):
+        arr = np.asarray(audio, dtype=np.float32)
+        if arr.size == 0:
+            continue
+
+        index += 1
+        with tempfile.NamedTemporaryFile(prefix="mockingbird-chunk-", suffix=".wav", delete=False) as handle:
+            chunk_path = handle.name
+        sf.write(chunk_path, arr, SAMPLE_RATE, format="WAV", subtype="PCM_16")
+        print(json.dumps({
+            "chunk": index,
+            "path": chunk_path,
+            "duration": round(float(len(arr)) / SAMPLE_RATE, 3),
+        }), flush=True)
+        chunks.append(arr)
+
+    if not chunks:
+        raise RuntimeError("The speech engine did not produce audio.")
+
+    full = np.concatenate(chunks)
+    with tempfile.NamedTemporaryFile(prefix="mockingbird-", suffix=".mp3", delete=False) as handle:
+        final_path = handle.name
+    sf.write(final_path, full, SAMPLE_RATE, format="MP3")
+    print(json.dumps({
+        "done": True,
+        "ok": True,
+        "path": final_path,
+        "duration": round(float(len(full)) / SAMPLE_RATE, 3),
+        "characters": len(cleaned),
+        "elapsed": round(time.time() - start, 3),
+    }), flush=True)
+
+
 def run_worker() -> int:
     pipeline = build_pipeline()
 
@@ -139,13 +185,15 @@ def run_worker() -> int:
 
         try:
             request = json.loads(line)
-            result = synthesize(
-                request.get("text", ""),
-                request.get("voice", DEFAULT_VOICE),
-                float(request.get("speed", DEFAULT_SPEED)),
-                pipeline=pipeline,
-            )
-            print(json.dumps({"ok": True, **result}), flush=True)
+            text = request.get("text", "")
+            voice = request.get("voice", DEFAULT_VOICE)
+            speed = float(request.get("speed", DEFAULT_SPEED))
+
+            if request.get("stream"):
+                stream_synthesize(text, voice, speed, pipeline)
+            else:
+                result = synthesize(text, voice, speed, pipeline=pipeline)
+                print(json.dumps({"ok": True, **result}), flush=True)
         except Exception as error:
             print(json.dumps({"ok": False, "error": str(error)}), flush=True)
 

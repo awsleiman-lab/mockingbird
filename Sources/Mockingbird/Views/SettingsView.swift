@@ -65,8 +65,13 @@ private struct GeneralSettingsView: View {
                     get: { controller.showsFloatingHUD },
                     set: { controller.setShowsFloatingHUD($0) }
                 ))
+
+                Toggle("Keep voice engine warm", isOn: Binding(
+                    get: { controller.keepsEngineWarm },
+                    set: { controller.setKeepsEngineWarm($0) }
+                ))
             } footer: {
-                Text("Clipboard fallback reads copied text when nothing is selected. The floating player appears near the corner of your screen during playback.")
+                Text("Clipboard fallback reads copied text when nothing is selected. The floating player appears near the corner of your screen during playback. Keeping the engine warm holds the voice model in memory (up to ~2 GB) so reading starts instantly instead of waiting for the engine to load.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

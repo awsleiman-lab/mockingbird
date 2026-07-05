@@ -21,6 +21,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published var usesClipboardFallback: Bool
     @Published var cacheLimit: Int
     @Published var showsFloatingHUD: Bool
+    @Published var keepsEngineWarm: Bool
     @Published var audioCache: [AudioCacheEntry] = []
     @Published var setupProgressText: String = ""
     @Published var setupFailureDetails: String = ""
@@ -36,6 +37,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     private var synthesisError: FileHandle?
     private var synthesisIdleTimer: Timer?
     private var synthesisIsGenerating = false
+    private var chunkedPlayer: ChunkedAudioPlayer?
+    @Published private(set) var isStreamingSynthesis = false
     private var synthesisErrorLines: [String] = []
     private var progressTimer: Timer?
     private var playbackCompletionTimer: Timer?
@@ -87,6 +90,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         usesClipboardFallback = defaults.object(forKey: Self.clipboardFallbackDefaultsKey) as? Bool ?? true
         cacheLimit = defaults.object(forKey: Self.cacheLimitDefaultsKey) as? Int ?? Self.maxCachedAudioFiles
         showsFloatingHUD = defaults.object(forKey: Self.showsHUDDefaultsKey) as? Bool ?? true
+        keepsEngineWarm = defaults.object(forKey: Self.keepWarmDefaultsKey) as? Bool ?? false
         super.init()
         floatingPlaybackHUD = FloatingPlaybackPanelController(controller: self)
         if !availableVoices.contains(selectedVoice) {
@@ -265,9 +269,13 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture(from: pasteboard)
         let oldString = snapshot.string
+        let baselineChangeCount = pasteboard.changeCount
 
         sendCopyKeystroke()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        Task { @MainActor [weak self] in
+            await Self.waitForPasteboardChange(from: baselineChangeCount, deadline: Date().addingTimeInterval(0.4))
+            guard let self else { return }
+
             let copied = pasteboard.string(forType: .string) ?? ""
             snapshot.restore(to: pasteboard)
 
@@ -282,6 +290,17 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
             }
 
             self.synthesizeAndPlay(text)
+        }
+    }
+
+    private static func waitForPasteboardChange(from baseline: Int, deadline: Date) async {
+        while NSPasteboard.general.changeCount == baseline, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        if NSPasteboard.general.changeCount != baseline {
+            // The source app just claimed the pasteboard; give it one tick to
+            // finish writing its data before we read.
+            try? await Task.sleep(for: .milliseconds(30))
         }
     }
 
@@ -332,6 +351,23 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         showsFloatingHUD = isEnabled
         UserDefaults.standard.set(isEnabled, forKey: Self.showsHUDDefaultsKey)
         syncFloatingPlaybackHUD()
+    }
+
+    func setKeepsEngineWarm(_ isEnabled: Bool) {
+        keepsEngineWarm = isEnabled
+        UserDefaults.standard.set(isEnabled, forKey: Self.keepWarmDefaultsKey)
+        if isEnabled {
+            warmEngineIfNeeded()
+        } else {
+            scheduleSynthesisWorkerShutdown()
+        }
+    }
+
+    private func warmEngineIfNeeded() {
+        guard keepsEngineWarm, selectedEngine != .system, !needsOnboarding else { return }
+        synthesisIdleTimer?.invalidate()
+        synthesisIdleTimer = nil
+        _ = try? startSynthesisWorkerIfNeeded()
     }
 
     func activateEngine(_ engine: SpeechEngineID) {
@@ -476,6 +512,16 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func seek(toProgress value: Double) {
+        if let chunkedPlayer {
+            guard chunkedPlayer.totalDuration > 0 else { return }
+            let clamped = min(max(value, 0), 1)
+            chunkedPlayer.seek(to: chunkedPlayer.totalDuration * clamped)
+            currentTime = chunkedPlayer.currentTime
+            duration = chunkedPlayer.totalDuration
+            progress = clamped
+            return
+        }
+
         guard let audioPlayer, audioPlayer.duration > 0 else { return }
         let clamped = min(max(value, 0), 1)
         audioPlayer.currentTime = audioPlayer.duration * clamped
@@ -485,6 +531,14 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func skipBack(_ seconds: TimeInterval = 10) {
+        if let chunkedPlayer {
+            guard chunkedPlayer.totalDuration > 0 else { return }
+            chunkedPlayer.seek(to: max(chunkedPlayer.currentTime - seconds, 0))
+            currentTime = chunkedPlayer.currentTime
+            progress = min(currentTime / chunkedPlayer.totalDuration, 1)
+            return
+        }
+
         guard let audioPlayer, audioPlayer.duration > 0 else { return }
         audioPlayer.currentTime = max(audioPlayer.currentTime - seconds, 0)
         currentTime = audioPlayer.currentTime
@@ -590,6 +644,30 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     func togglePause() {
+        if let chunkedPlayer {
+            if chunkedPlayer.isPaused {
+                playbackCompletionTimer?.invalidate()
+                playbackCompletionTimer = nil
+                if chunkedPlayer.isFinalized, chunkedPlayer.totalDuration > 0,
+                   chunkedPlayer.currentTime >= chunkedPlayer.totalDuration - 0.05 {
+                    chunkedPlayer.seek(to: 0)
+                    currentTime = 0
+                    progress = 0
+                }
+                chunkedPlayer.resume()
+                status = .playing
+                detail = "Playing generated audio."
+                startProgressTimer()
+            } else {
+                playbackCompletionTimer?.invalidate()
+                playbackCompletionTimer = nil
+                chunkedPlayer.pause()
+                status = .paused
+                detail = "Playback paused."
+            }
+            return
+        }
+
         guard let audioPlayer else { return }
         if audioPlayer.isPlaying {
             playbackCompletionTimer?.invalidate()
@@ -624,6 +702,8 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         } else {
             scheduleSynthesisWorkerShutdown()
         }
+        chunkedPlayer?.stop()
+        chunkedPlayer = nil
         audioPlayer?.stop()
         audioPlayer = nil
         currentAudioPath = nil
@@ -730,6 +810,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
                     setupLogLines = []
                     status = .ready
                     detail = "Ready for selected text."
+                    warmEngineIfNeeded()
                     return
                 }
 
@@ -1194,18 +1275,26 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
         Task {
             do {
-                let result = try await synthesize(text: text, requestID: requestID)
-                guard self.isCurrentRequest(requestID) else {
-                    self.deleteAudio(at: result.path)
-                    return
+                if selectedEngine == .system {
+                    let result = try await SystemSpeechSynthesizer.synthesize(
+                        text: text,
+                        voiceIdentifier: selectedVoice,
+                        speed: speechSpeed
+                    )
+                    guard self.isCurrentRequest(requestID) else {
+                        self.deleteAudio(at: result.path)
+                        return
+                    }
+                    let cachedPath = try self.cacheGeneratedAudio(at: result.path, for: text)
+                    guard self.isCurrentRequest(requestID) else {
+                        self.deleteAudio(at: cachedPath)
+                        self.refreshAudioCache()
+                        return
+                    }
+                    try playAudio(at: cachedPath, durationHint: result.duration, requestID: requestID)
+                } else {
+                    try await streamSynthesizeAndPlay(text, requestID: requestID)
                 }
-                let cachedPath = try self.cacheGeneratedAudio(at: result.path, for: text)
-                guard self.isCurrentRequest(requestID) else {
-                    self.deleteAudio(at: cachedPath)
-                    self.refreshAudioCache()
-                    return
-                }
-                try playAudio(at: cachedPath, durationHint: result.duration, requestID: requestID)
             } catch {
                 guard self.isCurrentRequest(requestID) else { return }
                 status = .error("Could not generate audio.")
@@ -1214,26 +1303,19 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         }
     }
 
-    private func synthesize(text: String, requestID: Int) async throws -> SynthesisResult {
+    private func streamSynthesizeAndPlay(_ text: String, requestID: Int) async throws {
         progress = 0
         progressText = "Generating speech..."
 
-        if selectedEngine == .system {
-            let result = try await SystemSpeechSynthesizer.synthesize(
-                text: text,
-                voiceIdentifier: selectedVoice,
-                speed: speechSpeed
-            )
-            return SynthesisResult(path: result.path, duration: result.duration)
-        }
-
         let worker = try startSynthesisWorkerIfNeeded()
         synthesisIsGenerating = true
+        isStreamingSynthesis = true
         synthesisIdleTimer?.invalidate()
         synthesisIdleTimer = nil
 
         defer {
             synthesisIsGenerating = false
+            isStreamingSynthesis = false
             if isCurrentRequest(requestID) {
                 scheduleSynthesisWorkerShutdown()
             }
@@ -1242,34 +1324,84 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         let request = SynthesisWorkerRequest(
             text: text,
             voice: selectedVoice,
-            speed: speechSpeed
+            speed: speechSpeed,
+            stream: true
         )
         var requestData = try JSONEncoder().encode(request)
         requestData.append(0x0A)
-
         worker.input.write(requestData)
-        progressText = "Generating speech..."
 
-        let responseData = try await readWorkerResponse(from: worker.output)
-        let response = try JSONDecoder().decode(SynthesisWorkerResponse.self, from: responseData)
+        let player = ChunkedAudioPlayer()
+        var startedPlayback = false
 
-        guard response.ok else {
-            throw NSError(
-                domain: "Mockingbird",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: response.error ?? latestSynthesisError()]
-            )
+        while true {
+            let responseData = try await readWorkerResponse(from: worker.output)
+            guard isCurrentRequest(requestID) else {
+                player.stop()
+                return
+            }
+
+            let message = try JSONDecoder().decode(SynthesisWorkerMessage.self, from: responseData)
+
+            if let error = message.error, message.ok != true {
+                player.stop()
+                if chunkedPlayer === player {
+                    chunkedPlayer = nil
+                }
+                throw NSError(
+                    domain: "Mockingbird",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: error]
+                )
+            }
+
+            if message.chunk != nil, let path = message.path {
+                let url = URL(fileURLWithPath: path)
+                try player.appendChunk(at: url)
+                try? FileManager.default.removeItem(at: url)
+
+                if !startedPlayback {
+                    startedPlayback = true
+                    playbackCompletionTimer?.invalidate()
+                    playbackCompletionTimer = nil
+                    chunkedPlayer = player
+                    currentAudioPath = nil
+                    status = .playing
+                    detail = "Playing generated audio."
+                    progressText = ""
+                    startProgressTimer()
+                }
+                continue
+            }
+
+            if message.done == true, let path = message.path {
+                let cachedPath = try cacheGeneratedAudio(at: path, for: text)
+                guard isCurrentRequest(requestID) else {
+                    deleteAudio(at: cachedPath)
+                    refreshAudioCache()
+                    player.stop()
+                    return
+                }
+                currentAudioPath = cachedPath
+                player.finalize()
+                if !startedPlayback {
+                    try playAudio(at: cachedPath, durationHint: message.duration ?? 0, requestID: requestID)
+                }
+                return
+            }
+
+            if message.ok == true, let path = message.path {
+                // Legacy single-response worker (e.g. the old frozen helper).
+                let cachedPath = try cacheGeneratedAudio(at: path, for: text)
+                guard isCurrentRequest(requestID) else {
+                    deleteAudio(at: cachedPath)
+                    refreshAudioCache()
+                    return
+                }
+                try playAudio(at: cachedPath, durationHint: message.duration ?? 0, requestID: requestID)
+                return
+            }
         }
-
-        guard let path = response.path, let duration = response.duration else {
-            throw NSError(
-                domain: "Mockingbird",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Speech worker returned an incomplete response."]
-            )
-        }
-
-        return SynthesisResult(path: path, duration: duration)
     }
 
     private func startSynthesisWorkerIfNeeded() throws -> SynthesisWorkerHandles {
@@ -1353,6 +1485,7 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func scheduleSynthesisWorkerShutdown() {
+        guard !keepsEngineWarm else { return }
         guard synthesisProcess?.isRunning == true, !synthesisIsGenerating else { return }
         synthesisIdleTimer?.invalidate()
         synthesisIdleTimer = Timer.scheduledTimer(withTimeInterval: Self.synthesisWarmIdleInterval, repeats: false) { [weak self] _ in
@@ -1495,10 +1628,43 @@ final class SpeechController: NSObject, ObservableObject, AVAudioPlayerDelegate 
         progressTimer?.invalidate()
         progressTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, let player = self.audioPlayer else { return }
+                guard let self else { return }
+
+                if let chunked = self.chunkedPlayer {
+                    self.currentTime = chunked.currentTime
+                    self.duration = chunked.totalDuration
+                    self.progress = self.duration > 0 ? min(self.currentTime / self.duration, 1) : 0
+                    if chunked.isFinalized, !chunked.isPaused, !self.isStreamingSynthesis,
+                       self.duration > 0, self.currentTime >= self.duration - 0.05 {
+                        self.finishChunkedPlayback()
+                    }
+                    return
+                }
+
+                guard let player = self.audioPlayer else { return }
                 self.currentTime = player.currentTime
                 self.duration = player.duration
                 self.progress = player.duration > 0 ? min(player.currentTime / player.duration, 1) : 0
+            }
+        }
+    }
+
+    private func finishChunkedPlayback() {
+        progressTimer?.invalidate()
+        progressTimer = nil
+        currentTime = duration
+        progress = 1
+        chunkedPlayer?.pause()
+        status = .paused
+        detail = "Playback finished."
+        playbackCompletionTimer?.invalidate()
+        playbackCompletionTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self,
+                      self.chunkedPlayer != nil,
+                      self.status == .paused,
+                      self.progress >= 1 else { return }
+                self.stop()
             }
         }
     }
@@ -1546,6 +1712,7 @@ private extension SpeechController {
     static let onboardingCompletedKey = "onboarding.completed"
     static let cacheLimitDefaultsKey = "settings.cacheLimit"
     static let showsHUDDefaultsKey = "settings.showsHUD"
+    static let keepWarmDefaultsKey = "settings.keepEngineWarm"
 
     static func clampedSpeed(_ speed: Double) -> Double {
         min(max(speed, 0.5), 2.0)
@@ -1645,18 +1812,16 @@ private struct SynthesisWorkerRequest: Encodable {
     let text: String
     let voice: String
     let speed: Double
+    let stream: Bool
 }
 
-private struct SynthesisWorkerResponse: Decodable {
-    let ok: Bool
+private struct SynthesisWorkerMessage: Decodable {
+    let ok: Bool?
+    let chunk: Int?
+    let done: Bool?
     let path: String?
     let duration: TimeInterval?
     let error: String?
-}
-
-private struct SynthesisResult: Decodable {
-    let path: String
-    let duration: TimeInterval
 }
 
 private struct PasteboardSnapshot {
