@@ -103,11 +103,20 @@ else
     --title "Mockingbird $VERSION" --notes "$NOTES"
 fi
 
+# Note: zsh does not word-split `${VAR:+-f sha=...}` — it becomes a single
+# malformed argument and GitHub rejects the update with "sha wasn't supplied".
+# Use an explicit branch instead.
 EXISTING_SHA="$(gh api "repos/$RELEASES_REPO/contents/appcast.xml" --jq .sha 2>/dev/null || true)"
-gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
-  -f message="Appcast: Mockingbird $VERSION" \
-  -f content="$(base64 -i "$APPCAST")" \
-  ${EXISTING_SHA:+-f sha="$EXISTING_SHA"} >/dev/null
+if [[ -n "$EXISTING_SHA" ]]; then
+  gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
+    -f message="Appcast: Mockingbird $VERSION" \
+    -f content="$(base64 -i "$APPCAST")" \
+    -f sha="$EXISTING_SHA" >/dev/null
+else
+  gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
+    -f message="Appcast: Mockingbird $VERSION" \
+    -f content="$(base64 -i "$APPCAST")" >/dev/null
+fi
 
 echo "==> Updating website page (.website/app.md)"
 WEBSITE_MD=".website/app.md"
