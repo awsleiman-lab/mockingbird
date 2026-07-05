@@ -3,9 +3,10 @@ import SwiftUI
 
 @MainActor
 final class FloatingPlaybackPanelController: NSObject, NSWindowDelegate {
-    // The pill is 330pt wide; the panel adds transparent padding around it so
-    // the hover close badge can sit outside the pill's corner.
-    private static let panelSize = NSSize(width: 354, height: 96)
+    // The pill is 330pt wide and ~90pt tall; the panel adds transparent
+    // padding around it so the hover close badge can sit outside the pill's
+    // corner without being clipped.
+    private static let panelSize = NSSize(width: 354, height: 118)
     private static let originXKey = "hud.origin.x"
     private static let originYKey = "hud.origin.y"
 
@@ -117,17 +118,16 @@ private struct FloatingPlaybackHUDView: View {
     @State private var showsRemainingTime = false
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            pill
-                .padding(12)
-
-            if isHovering {
-                closeBadge
-                    .offset(x: 3, y: 3)
-                    .transition(.opacity)
+        pill
+            .overlay(alignment: .topLeading) {
+                if isHovering {
+                    closeBadge
+                        .offset(x: -8, y: -8)
+                        .transition(.opacity)
+                }
             }
-        }
-        .frame(width: 354, height: 96, alignment: .center)
+            .padding(12)
+            .frame(width: 354, height: 118, alignment: .center)
         .contentShape(Rectangle())
         .background {
             // SwiftUI's onHover never fires in a non-activating panel while the
@@ -158,7 +158,6 @@ private struct FloatingPlaybackHUDView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(.white.opacity(isHovering ? 0.22 : 0.12), lineWidth: 0.5)
         }
-        .frame(maxHeight: .infinity, alignment: .center)
     }
 
     private var closeBadge: some View {
