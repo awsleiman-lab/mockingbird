@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible problem in Mockingbird.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "Please do not include passwords, API keys, private text, or security vulnerabilities."
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the unexpected behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Mockingbird version or commit
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac model
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or screenshots
+      description: Redact personal or sensitive content before attaching anything.
