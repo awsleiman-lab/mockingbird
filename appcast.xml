@@ -3,6 +3,16 @@
     <channel>
         <title>Mockingbird</title>
         <item>
+            <title>1.1.2</title>
+            <pubDate>Sat, 18 Jul 2026 12:37:07 +0000</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[New Kokoro engine installations now use PyTorch 2.13.0, addressing an upstream low-severity security advisory.]]></description>
+            <enclosure url="https://github.com/awsleiman171/mockingbird-releases/releases/download/v1.1.2/Mockingbird-1.1.2.dmg" length="4134791" type="application/octet-stream" sparkle:edSignature="j5mnGdS03MaNekMjAjLktxNMf3qogoLZFgtc9NbObXGSMv+pIjOcG44HtaQTQHRv2R8BMcuLHr66l7X8ZrqBAA=="/>
+        </item>
+        <item>
             <title>1.1.1</title>
             <pubDate>Sun, 05 Jul 2026 09:23:22 +0000</pubDate>
             <sparkle:version>6</sparkle:version>
