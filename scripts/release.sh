@@ -6,18 +6,16 @@ set -euo pipefail
 #   2. Builds the notarized DMG (scripts/export_dmg.sh).
 #   3. Sparkle-signs it (EdDSA key, keychain account "Mockingbird") and prepends the entry
 #      to appcast.xml (tracked here as source of truth).
-#   4. Pushes appcast.xml to the PUBLIC awsleiman171/mockingbird-releases repo and creates
-#      the GitHub release v<version> there with the DMG attached.
-#   5. Updates .website/app.md in that repo (version + download frontmatter) so
-#      www.awsleiman.com — which rebuilds from that repo's content — never shows a
-#      stale version.
+#   4. Creates the GitHub release v<version> in the PUBLIC
+#      awsleiman171/mockingbird-releases repo with the DMG attached.
+#   5. Atomically updates appcast.xml and .website/app.md in that repo so
+#      www.awsleiman.com and the Sparkle feed always publish the same version.
 #   6. Commits the release changes here (Info.plist, appcast), tags v<version>, pushes
 #      branch + tag to origin, and creates a GitHub release on this repo from the tag
 #      (notes + DMG link, no binary) so releases are trackable next to the code.
 #
-# The source repo is private; releases live in the public repo — a feed or download URL
-# pointing at a private repo 404s for everyone but the owner, which is how updates silently
-# work for nobody. Same layout as Gibran's pipeline.
+# The source repo and updater repo are public. Keeping the binary and Sparkle feed in the
+# dedicated updater repo gives the website and installed apps stable download URLs.
 #
 # Prerequisites: `gh auth login` once (account awsleiman171).
 # Usage: scripts/release.sh 1.0.2 ["release notes"]
@@ -31,8 +29,26 @@ APPCAST="$ROOT/appcast.xml"
 SIGN_UPDATE="$ROOT/.build/artifacts/sparkle/Sparkle/bin/sign_update"
 RELEASES_REPO="${MOCKINGBIRD_RELEASES_REPO:-awsleiman171/mockingbird-releases}"
 DOWNLOAD_URL="https://github.com/$RELEASES_REPO/releases/download/v$VERSION/Mockingbird-$VERSION.dmg"
+SOURCE_REPO="${MOCKINGBIRD_SOURCE_REPO:-awsleiman-lab/mockingbird}"
+WEBSITE_MD=".website/app.md"
 
 [[ -x "$SIGN_UPDATE" ]] || { echo "sign_update not found — run 'swift build -c release' once first." >&2; exit 1; }
+gh repo view "$RELEASES_REPO" >/dev/null 2>&1 || {
+  echo "Release repository $RELEASES_REPO does not exist or is inaccessible." >&2
+  exit 1
+}
+gh api "repos/$RELEASES_REPO/contents/$WEBSITE_MD" >/dev/null 2>&1 || {
+  echo "$WEBSITE_MD not found in $RELEASES_REPO; restore it before releasing." >&2
+  exit 1
+}
+if gh release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1 \
+   || gh api "repos/$RELEASES_REPO/git/ref/tags/v$VERSION" >/dev/null 2>&1 \
+   || gh release view "v$VERSION" --repo "$SOURCE_REPO" >/dev/null 2>&1 \
+   || git -C "$ROOT" show-ref --verify --quiet "refs/tags/v$VERSION" \
+   || git -C "$ROOT" ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+  echo "Version v$VERSION already exists. Choose a new version; published releases are immutable." >&2
+  exit 1
+fi
 
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$PLIST")"
 NEW_BUILD=$((BUILD + 1))
@@ -74,9 +90,7 @@ if os.path.exists(appcast):
     src = open(appcast).read()
     build_tag = f"<sparkle:version>{os.environ['NEW_BUILD']}</sparkle:version>"
     if build_tag in src:
-        # Re-releasing the same build (e.g. a fixed DMG): replace its item in place.
-        src = re.sub(r"        <item>(?:(?!</item>).)*?" + re.escape(build_tag) + r".*?</item>\n",
-                     item, src, count=1, flags=re.S)
+        raise SystemExit(f"build {os.environ['NEW_BUILD']} already exists in the appcast")
     else:
         src = src.replace("<title>Mockingbird</title>\n", "<title>Mockingbird</title>\n" + item, 1)
 else:
@@ -94,62 +108,50 @@ EOF
 echo "==> Publishing to $RELEASES_REPO"
 # Release first, appcast second: the moment the appcast goes live its enclosure URL must
 # already resolve, otherwise apps that check during the gap show users a failed update.
-# (One-time bootstrap: GitHub refuses releases in a repo with zero commits — on a brand-new
-# repo, push any file once before running this script.)
-if gh release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
-  gh release upload "v$VERSION" "$DMG_PATH" --clobber --repo "$RELEASES_REPO"
-else
-  gh release create "v$VERSION" "$DMG_PATH" --repo "$RELEASES_REPO" \
-    --title "Mockingbird $VERSION" --notes "$NOTES"
+RELEASE_FLAGS=()
+if [[ "$VERSION" == *-* ]]; then
+  RELEASE_FLAGS+=(--prerelease --latest=false)
 fi
+gh release create "v$VERSION" "$DMG_PATH" --repo "$RELEASES_REPO" \
+  --title "Mockingbird $VERSION" --notes "$NOTES" "${RELEASE_FLAGS[@]}"
 
-# Note: zsh does not word-split `${VAR:+-f sha=...}` — it becomes a single
-# malformed argument and GitHub rejects the update with "sha wasn't supplied".
-# Use an explicit branch instead.
-EXISTING_SHA="$(gh api "repos/$RELEASES_REPO/contents/appcast.xml" --jq .sha 2>/dev/null || true)"
-if [[ -n "$EXISTING_SHA" ]]; then
-  gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
-    -f message="Appcast: Mockingbird $VERSION" \
-    -f content="$(base64 -i "$APPCAST")" \
-    -f sha="$EXISTING_SHA" >/dev/null
-else
-  gh api -X PUT "repos/$RELEASES_REPO/contents/appcast.xml" \
-    -f message="Appcast: Mockingbird $VERSION" \
-    -f content="$(base64 -i "$APPCAST")" >/dev/null
-fi
-
-echo "==> Updating website page (.website/app.md)"
-WEBSITE_MD=".website/app.md"
-PAGE_JSON="$RELEASES/app.md.json"
-PAGE_NEW="$RELEASES/app.md.new"
-rm -f "$PAGE_JSON" "$PAGE_NEW"
-gh api "repos/$RELEASES_REPO/contents/$WEBSITE_MD" > "$PAGE_JSON" \
-  || { echo "$WEBSITE_MD not found in $RELEASES_REPO — the website would go stale. Restore it (or fix WEBSITE_MD) and re-run." >&2; exit 1; }
-export PAGE_JSON PAGE_NEW
+echo "==> Publishing appcast.xml + $WEBSITE_MD atomically"
+BRANCH="$(gh api "repos/$RELEASES_REPO" --jq .default_branch)"
+HEAD_SHA="$(gh api "repos/$RELEASES_REPO/git/ref/heads/$BRANCH" --jq .object.sha)"
+APP_MD_FILE="$(mktemp)"
+trap 'rm -f "$APP_MD_FILE"' EXIT
+gh api "repos/$RELEASES_REPO/contents/$WEBSITE_MD?ref=$BRANCH" \
+  -H "Accept: application/vnd.github.raw" > "$APP_MD_FILE"
+export APP_MD_FILE
 python3 - <<'EOF'
-import base64, json, os, re, sys
+import os, re, sys
 
-page = json.load(open(os.environ["PAGE_JSON"]))
-src = base64.b64decode(page["content"]).decode()
+path = os.environ["APP_MD_FILE"]
+src = open(path).read()
 
 new, n_ver = re.subn(r"^version:.*$", f"version: {os.environ['VERSION']}", src, count=1, flags=re.M)
 new, n_dl = re.subn(r"^download:.*$", f"download: {os.environ['DOWNLOAD_URL']}", new, count=1, flags=re.M)
 if not (n_ver and n_dl):
-    sys.exit(f"could not find 'version:'/'download:' frontmatter in {os.environ['PAGE_JSON']}")
-
-if new == src:
-    print("website page already current")
-else:
-    open(os.environ["PAGE_NEW"], "w").write(new)
+    sys.exit(f"could not find 'version:'/'download:' frontmatter in {path}")
+open(path, "w").write(new)
 EOF
-if [[ -f "$PAGE_NEW" ]]; then
-  gh api -X PUT "repos/$RELEASES_REPO/contents/$WEBSITE_MD" \
-    -f message="Website: Mockingbird $VERSION" \
-    -f content="$(base64 -i "$PAGE_NEW")" \
-    -f sha="$(python3 -c 'import json,os;print(json.load(open(os.environ["PAGE_JSON"]))["sha"])')" >/dev/null
-  echo "website page updated"
-fi
-rm -f "$PAGE_JSON" "$PAGE_NEW"
+
+BASE_TREE="$(gh api "repos/$RELEASES_REPO/git/commits/$HEAD_SHA" --jq .tree.sha)"
+APPCAST_BLOB="$(gh api -X POST "repos/$RELEASES_REPO/git/blobs" \
+  -f encoding=base64 -f content="$(base64 -i "$APPCAST")" --jq .sha)"
+APP_MD_BLOB="$(gh api -X POST "repos/$RELEASES_REPO/git/blobs" \
+  -f encoding=base64 -f content="$(base64 -i "$APP_MD_FILE")" --jq .sha)"
+TREE_SHA="$(python3 -c 'import json, sys
+base, appcast, app_md = sys.argv[1:4]
+print(json.dumps({"base_tree": base, "tree": [
+    {"path": "appcast.xml", "mode": "100644", "type": "blob", "sha": appcast},
+    {"path": ".website/app.md", "mode": "100644", "type": "blob", "sha": app_md},
+]}))' "$BASE_TREE" "$APPCAST_BLOB" "$APP_MD_BLOB" \
+  | gh api -X POST "repos/$RELEASES_REPO/git/trees" --input - --jq .sha)"
+COMMIT_SHA="$(gh api -X POST "repos/$RELEASES_REPO/git/commits" \
+  -f message="Release Mockingbird $VERSION: appcast + website page" \
+  -f tree="$TREE_SHA" -f "parents[]=$HEAD_SHA" --jq .sha)"
+gh api -X PATCH "repos/$RELEASES_REPO/git/refs/heads/$BRANCH" -f sha="$COMMIT_SHA" >/dev/null
 
 echo "==> Tagging source repo v$VERSION"
 git -C "$ROOT" add appcast.xml AppBundle/Contents/Info.plist
@@ -157,25 +159,19 @@ git -C "$ROOT" diff --cached --quiet || git -C "$ROOT" commit -m "Release $VERSI
 if [[ -n "$(git -C "$ROOT" status --porcelain)" ]]; then
   echo "    note: working tree has other uncommitted changes — the tag will not include them"
 fi
-# Forced on purpose: re-releasing a version (fixed DMG) moves its tag to the new state.
-git -C "$ROOT" tag -f -a "v$VERSION" -m "Mockingbird $VERSION (build $NEW_BUILD)
+git -C "$ROOT" tag -a "v$VERSION" -m "Mockingbird $VERSION (build $NEW_BUILD)
 
 $NOTES"
 git -C "$ROOT" push origin HEAD
-git -C "$ROOT" push -f origin "refs/tags/v$VERSION"
+git -C "$ROOT" push origin "refs/tags/v$VERSION"
 
 # Mirror the release on the source repo (no binary — the DMG lives on the public
 # releases repo) so the tag shows up under Releases with its notes.
-SOURCE_REPO="${MOCKINGBIRD_SOURCE_REPO:-awsleiman-lab/mockingbird}"
 SOURCE_NOTES="$NOTES
 
 Download: $DOWNLOAD_URL"
-if gh release view "v$VERSION" --repo "$SOURCE_REPO" >/dev/null 2>&1; then
-  gh release edit "v$VERSION" --repo "$SOURCE_REPO" --notes "$SOURCE_NOTES" >/dev/null
-else
-  gh release create "v$VERSION" --repo "$SOURCE_REPO" --verify-tag \
-    --title "Mockingbird $VERSION" --notes "$SOURCE_NOTES" >/dev/null
-fi
+gh release create "v$VERSION" --repo "$SOURCE_REPO" --verify-tag \
+  --title "Mockingbird $VERSION" --notes "$SOURCE_NOTES" "${RELEASE_FLAGS[@]}" >/dev/null
 
 echo ""
 echo "Published:"
